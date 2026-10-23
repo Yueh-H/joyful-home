@@ -397,7 +397,7 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
     def chat_record(document):
         store = app.state.chat
         status = store.status(document)
-        row = {"request_id": document["request_id"], "order": str(document["order"]).zfill(20),
+        row = {"conversation_id": document.get("conversation_id") or c.CHAT_LEGACY, "request_id": document["request_id"], "order": str(document["order"]).zfill(20),
                "status": status, "created_at": document["created_at"], "message": document["message"],
                "finished_at": document.get("finished_at"), "reply": document.get("response", {}).get("reply"),
                "images": [{"id": image["id"], "mime_type": image["mime_type"], "width": image["width"], "height": image["height"],
@@ -415,11 +415,24 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
             row["proposal"] = {"id": preview["id"], "summary": preview["summary"], "status": proposal_status}
         return row
 
+    @app.get(c.CHAT_CONVERSATIONS)
+    def chat_conversations(before: str | None = Query(None, max_length=500), limit: int = Query(30, ge=1, le=100), sid=Depends(authenticated)):
+        if app.state.chat is None:
+            return {"conversations": [], "before": None, "persistent": False}
+        rows, cursor = app.state.chat.conversation_page(before, limit)
+        return {"conversations": rows, "before": cursor, "persistent": True}
+
+    @app.post(c.CHAT_CONVERSATIONS)
+    def create_chat_conversation(sid=Depends(authenticated)):
+        if app.state.chat is None:
+            raise ChatStoreError("新增對話需要本機 MongoDB 保存。")
+        return app.state.chat.create_conversation()
+
     @app.get(c.CHAT)
-    def chat_history(before: str | None = None, limit: int = Query(50, ge=1, le=100), sid=Depends(authenticated)):
+    def chat_history(before: str | None = None, limit: int = Query(50, ge=1, le=100), conversation_id: c.ConversationID | None = None, sid=Depends(authenticated)):
         if app.state.chat is None:
             return {"turns": [], "before": None, "persistent": False}
-        rows, cursor = app.state.chat.page(before, limit)
+        rows, cursor = app.state.chat.page(before, limit, conversation_id)
         return {"turns": [chat_record(row) for row in rows], "before": cursor, "persistent": True}
 
     @app.get(c.CHAT_IMAGE)
@@ -442,18 +455,18 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
         if images and store is None:
             raise ChatStoreError("圖片對話需要本機 MongoDB 保存，請先設定家庭資料庫。")
         if store is not None:
-            document, fresh = store.reserve(body.request_id or secrets.token_urlsafe(24), body.message, images)
+            document, fresh = store.reserve(body.request_id or secrets.token_urlsafe(24), body.message, images, body.conversation_id)
             if not fresh:
                 status = store.status(document)
                 if status == "complete":
                     # A duplicate may come from a new session or after a restart: never revive an old proposal.
                     return {"reply": document["response"]["reply"], "proposal": None,
-                            "request_id": document["request_id"], "status": status}
+                            "request_id": document["request_id"], "conversation_id": document.get("conversation_id") or c.CHAT_LEGACY, "status": status}
                 if status == "failed":
                     raise HTTPException(document.get("error_status", 503), document["error"])
                 if status == "interrupted":
                     raise HTTPException(409, "上次訊息已保存，但回覆中斷；請重新提出要求。")
-                return JSONResponse({"request_id": document["request_id"], "status": "processing"}, status_code=202)
+                return JSONResponse({"request_id": document["request_id"], "conversation_id": document.get("conversation_id") or c.CHAT_LEGACY, "status": "processing"}, status_code=202)
         try:
             rate_limit(("chat", sid), 12, 60)
             with lock:
@@ -475,7 +488,7 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
             raise HTTPException(503, "回覆未完成，請重新提出要求。") from None
         if store:
             store.finish(document, response=response)
-            response.update(request_id=document["request_id"], status="complete")
+            response.update(request_id=document["request_id"], conversation_id=document.get("conversation_id") or c.CHAT_LEGACY, status="complete")
         return response
 
     def plan_chat(body, sid, current, result):

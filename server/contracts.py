@@ -11,6 +11,9 @@ STATE = f"{API}/state"
 ITEMS = f"{API}/items"
 ACTIONS = f"{API}/actions"
 CHAT = f"{API}/chat"
+CHAT_CONVERSATIONS = f"{CHAT}/conversations"
+CHAT_LEGACY = "legacy"
+ConversationID = Annotated[str, Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")]
 CHAT_IMAGE = f"{CHAT}/{{request_id}}/images/{{image_id}}"
 CHAT_IMAGE_MAX_BYTES = 2 * 1024 * 1024
 CHAT_IMAGE_MAX_COUNT = 4
@@ -100,6 +103,7 @@ class ChatImage(StrictModel):
     data: str = Field(min_length=1, max_length=((CHAT_IMAGE_MAX_BYTES + 2) // 3) * 4)
 
 class ChatInput(StrictModel):
+    conversation_id: ConversationID | None = None
     request_id: str | None = Field(default=None, min_length=16, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     message: str = Field(default="", max_length=6000)
     images: list[ChatImage] = Field(default_factory=list, max_length=CHAT_IMAGE_MAX_COUNT)

@@ -1,4 +1,4 @@
-import { API, CATEGORIES, CHAT_IMAGES } from './contracts.js';
+import { API, CATEGORIES, CHAT_IMAGES, CHAT_LEGACY } from './contracts.js';
 import { createFloorplan } from './floorplan.js';
 
 const $ = selector => document.querySelector(selector);
@@ -15,10 +15,6 @@ let search = '';
 let state = null;
 let stateError = '';
 let busy = false;
-let chatBusy = false;
-let messages = [];
-let chatBefore = null, chatError = '', chatPersistent = false, chatLoading = false, chatAttempt = null;
-let proposal = null;
 let sessionGeneration = 0;
 let toastTimer;
 let returnFocus = null;
@@ -26,9 +22,19 @@ let authenticated = false;
 let lastUpdated = null;
 const AUTO_REFRESH_MS = 30_000;
 let lastStateAttempt = null, automaticRefresh = null, automaticRefreshTimer = null;
-let chatDraft = '';
-let chatComposing = false;
-let chatImages = [];
+const conversationStates = new Map();
+function newChat(id = null) {
+  return { id, localKey: id || 'draft-' + (crypto.randomUUID?.() || String(Date.now()) + Math.random()), busy: false, messages: [], before: null, error: '', persistent: false,
+    loading: false, attempt: null, proposal: null, draft: '', composing: false, images: [], readGeneration: 0 };
+}
+let chat = newChat();
+conversationStates.set('draft', chat);
+let conversations = [], conversationsBefore = null, conversationsLoading = false, conversationsReady = false, conversationsError = '';
+const conversationDialog = $('#conversation-dialog');
+let conversationReturnFocus = null;
+function selectedPreference(id) { try { if (id) localStorage.setItem('joyful-home-chat-selected', id); else localStorage.removeItem('joyful-home-chat-selected'); } catch { /* Preference storage is optional. */ } }
+function savedConversation() { try { return localStorage.getItem('joyful-home-chat-selected'); } catch { return null; } }
+
 const floorplan = createFloorplan({
   request: async (path, body, method) => body === undefined ? (await api(path)).json() : request(path, body, method),
   onExpired: () => loggedOut('登入已過期，請重新輸入家庭密碼。'),
@@ -78,14 +84,18 @@ function loggedOut(message = '', configured = true) {
   floorplan.reset();
   authenticated = false;
   lastUpdated = null;lastStateAttempt=null;automaticRefresh=null;clearTimeout(automaticRefreshTimer);automaticRefreshTimer=null;
-  chatDraft = '';
-  chatComposing = false;
-  chatImages = [];
+  for (const target of new Set(conversationStates.values())) { target.images = []; target.messages = []; target.draft = ''; target.proposal = null; target.attempt = null; }
+  conversationStates.clear(); chat = newChat(); conversationStates.set('draft', chat);
+  conversations = []; conversationsBefore = null; conversationsLoading = false; conversationsReady = false; conversationsError = '';
+  selectedPreference(null);
+  if (conversationDialog.open) conversationDialog.close();
+  conversationDialog.replaceChildren();
+  conversationReturnFocus = null;
   state = null;
-  messages = [];
-  chatBefore = null; chatError = ''; chatPersistent = false; chatLoading = false; chatAttempt = null;
-  proposal = null;
-  chatBusy = false;
+  chat.messages = [];
+  chat.before = null; chat.error = ''; chat.persistent = false; chat.loading = false; chat.attempt = null;
+  chat.proposal = null;
+  chat.busy = false;
   busy = false;
   stateError = '';
   clearTimeout(toastTimer);$('#toast').hidden=true;$('#toast').textContent='';
@@ -107,6 +117,7 @@ function renderLogin(message = '', configured = true) {
       authenticated = true;
       form.reset();
       await loadState();
+      await loadConversations({ initial: true });
       await loadChat();
     } catch (error) {
       form.querySelector('.login-error').textContent = error.message;
@@ -137,16 +148,129 @@ async function loadState({ background = false } = {}) {
   }
 }
 
-async function loadChat({ older = false } = {}) {
-  const generation = sessionGeneration;
-  chatLoading = true;
-  chatError = '';
+function renderConversationList() {
+  return `<div class="conversation-heading"><h2>歷史對話</h2><button class="button" data-conversation-new ${conversationsLoading ? 'disabled' : ''}>新增對話</button></div>${conversationsError ? `<p class="form-error" role="alert">${esc(conversationsError)}</p>` : ''}<div class="conversation-list">${conversations.map(row => `<button class="conversation-entry ${chat.id === row.conversation_id ? 'selected' : ''}" data-conversation="${esc(row.conversation_id)}" ${chat.id === row.conversation_id ? 'aria-current="true"' : ''}><span>${esc(row.title)}</span><time datetime="${esc(row.updated_at)}">${esc(formatTime(row.updated_at))}${conversationStates.get(row.conversation_id)?.busy ? ' · 回覆中' : ''}</time></button>`).join('') || `<p class="subtitle">${conversationsLoading ? '正在讀取歷史對話…' : '還沒有對話。可以先寫下想問的事。'}</p>`}</div><div class="conversation-list-actions"><button class="text-button" data-conversations-refresh ${conversationsLoading ? 'disabled' : ''}>更新歷史對話</button>${conversationsBefore ? `<button class="text-button" data-conversations-older ${conversationsLoading ? 'disabled' : ''}>載入更早的對話</button>` : ''}</div>`;
+}
+
+function updateConversationPanels() {
+  const panel = app.querySelector('.conversation-panel');
+  if (panel) { panel.innerHTML = renderConversationList(); bindConversationControls(panel); }
+  if (conversationDialog.open) {
+    const body = conversationDialog.querySelector('[data-conversation-list]');
+    if (body) { body.innerHTML = renderConversationList(); bindConversationControls(body); }
+  }
+}
+
+function selectConversation(id) {
+  const input = $('#chat-message');
+  if (input && input.dataset.conversation === chat.localKey) chat.draft = input.value;
+  if (!conversationStates.has(id)) conversationStates.set(id, newChat(id));
+  chat = conversationStates.get(id);
+  selectedPreference(id);
+  if (conversationDialog.open) conversationDialog.close();
+  render();
+  loadChat({ target: chat });
+}
+
+let conversationsReadGeneration = 0;
+async function loadConversations({ older = false, initial = false } = {}) {
+  const generation = sessionGeneration, readGeneration = ++conversationsReadGeneration;
+  conversationsLoading = true; conversationsError = ''; updateConversationPanels();
   try {
-    const path = API.chat + (older && chatBefore ? `?before=${encodeURIComponent(chatBefore)}` : '');
-    const data = await (await api(path)).json();
+    const params = new URLSearchParams();
+    if (older && conversationsBefore) params.set('before', conversationsBefore);
+    const data = await (await api(API.conversations + (params.size ? '?' + params : ''))).json();
+    if (generation !== sessionGeneration || readGeneration !== conversationsReadGeneration) return;
+    const merged = new Map(conversations.map(row => [row.conversation_id, row]));
+    for (const row of data.conversations) if (!merged.has(row.conversation_id) || row.updated_at >= merged.get(row.conversation_id).updated_at) merged.set(row.conversation_id, row);
+    conversations = [...merged.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.conversation_id.localeCompare(a.conversation_id));
+    conversationsBefore = data.before; conversationsReady = true;
+    if (initial && !chat.id && !chat.draft && !chat.images.length && conversations.length) {
+      const id = conversations.some(row => row.conversation_id === savedConversation()) ? savedConversation() : conversations[0].conversation_id;
+      if (!conversationStates.has(id)) conversationStates.set(id, newChat(id));
+      chat = conversationStates.get(id); selectedPreference(id);
+      if (authenticated) render();
+    }
+  } catch (error) {
+    if (generation === sessionGeneration && readGeneration === conversationsReadGeneration) conversationsError = error.message;
+  } finally {
+    if (generation === sessionGeneration && readGeneration === conversationsReadGeneration) { conversationsLoading = false; updateConversationPanels(); }
+  }
+}
+
+async function ensureConversation(target) {
+  if (target.id) return;
+  if (target.creating) return target.creating;
+  const generation = sessionGeneration;
+  target.creating = (async () => {
+    const row = await request(API.conversations, {});
     if (generation !== sessionGeneration) return;
-    chatPersistent = data.persistent;
-    chatBefore = data.before;
+    target.id = row.conversation_id; target.persistent = true;
+    conversationStates.set(target.id, target);
+    conversations = [row, ...conversations.filter(value => value.conversation_id !== row.conversation_id)];
+    if (target === chat) selectedPreference(target.id);
+    updateConversationPanels();
+  })();
+  try { await target.creating; } finally { target.creating = null; }
+}
+
+async function createConversation() {
+  if (conversationsLoading) return;
+  const generation = sessionGeneration, origin = chat;
+  conversationsLoading = true; updateConversationPanels();
+  const target = newChat();
+  try {
+    await ensureConversation(target);
+    if (generation !== sessionGeneration) return;
+    // Explicit New selects the result only if the user has not meanwhile selected another chat.
+    if (chat === origin) selectConversation(target.id);
+  } catch (error) {
+    if (generation === sessionGeneration) { conversationsError = error.message; updateConversationPanels(); }
+  } finally {
+    if (generation === sessionGeneration) { conversationsLoading = false; updateConversationPanels(); }
+  }
+}
+
+function openConversationDrawer() {
+  conversationReturnFocus = document.activeElement;
+  conversationDialog.innerHTML = `<div class="dialog-head"><h2 id="conversation-dialog-title">選擇對話</h2><button type="button" class="close" data-conversation-close aria-label="關閉歷史對話">×</button></div><div data-conversation-list>${renderConversationList()}</div>`;
+  conversationDialog.querySelector('[data-conversation-close]').addEventListener('click', () => conversationDialog.close());
+  bindConversationControls(conversationDialog);
+  conversationDialog.showModal();
+}
+conversationDialog.addEventListener('click', event => {
+  const rect = conversationDialog.getBoundingClientRect();
+  if (event.target === conversationDialog && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)) conversationDialog.close();
+});
+conversationDialog.addEventListener('close', () => {
+  if (!authenticated) return;
+  const target = conversationReturnFocus?.isConnected ? conversationReturnFocus : app.querySelector('[data-conversation-drawer]');
+  target?.focus({ preventScroll: true });
+});
+function bindConversationControls(node) {
+  node.querySelectorAll('[data-conversation]').forEach(button => {
+    if (button.tagName !== 'BUTTON' || button.dataset.boundConversation) return;
+    button.dataset.boundConversation = 'true'; button.addEventListener('click', () => selectConversation(button.dataset.conversation));
+  });
+  for (const [selector, handler] of [ ['[data-conversation-new]', createConversation], ['[data-conversation-drawer]', openConversationDrawer], ['[data-conversations-refresh]', () => loadConversations()], ['[data-conversations-older]', () => loadConversations({ older: true })] ]) {
+    node.querySelectorAll(selector).forEach(button => { if (!button.dataset.boundConversation) { button.dataset.boundConversation = 'true'; button.addEventListener('click', handler); } });
+  }
+}
+
+async function loadChat({ older = false, target = chat } = {}) {
+  if (!target.id) { target.persistent = true; if (authenticated && target === chat) render(); return; }
+  const readGeneration = ++target.readGeneration;
+  const generation = sessionGeneration;
+  target.loading = true;
+  target.error = '';
+  try {
+    const params = new URLSearchParams({ conversation_id: target.id });
+    if (older && target.before) params.set('before', target.before);
+    const path = API.chat + '?' + params;
+    const data = await (await api(path)).json();
+    if (generation !== sessionGeneration || readGeneration !== target.readGeneration) return;
+    target.persistent = data.persistent;
+    target.before = data.before;
     const loaded = data.turns.flatMap(turn => {
       const user = { id: `${turn.request_id}:user`, request_id: turn.request_id, role: 'user', content: turn.message,
         at: turn.created_at, order: turn.order, status: turn.status, images: turn.images || [] };
@@ -155,23 +279,29 @@ async function loadChat({ older = false } = {}) {
       return [user, { id: `${turn.request_id}:assistant`, request_id: turn.request_id, role: 'assistant', content: reply,
         at: turn.finished_at, order: turn.order, status: turn.status, preview: turn.proposal }];
     });
-    const merged = new Map(messages.map(message => [message.id, message]));
+    const merged = new Map(target.messages.map(message => [message.id, message]));
     loaded.forEach(message => merged.set(message.id, message));
-    messages = [...merged.values()].sort((a, b) => (a.order || '~').localeCompare(b.order || '~') || (a.role === 'user' ? -1 : 1));
-    if (proposal && loaded.some(message => message.preview?.id === proposal.id && message.preview.status !== 'pending')) proposal = null;
-    const completedAttempt = chatAttempt && data.turns.find(turn => turn.request_id === chatAttempt.id && ['failed', 'complete', 'interrupted'].includes(turn.status));
-    if (completedAttempt) { if (completedAttempt.status === 'complete') chatImages = []; chatAttempt = null; }
+    target.messages = [...merged.values()].sort((a, b) => (a.order || '~').localeCompare(b.order || '~') || (a.role === 'user' ? -1 : 1));
+    if (target.proposal && loaded.some(message => message.preview?.id === target.proposal.id && message.preview.status !== 'pending')) target.proposal = null;
+    const completedAttempt = target.attempt && data.turns.find(turn => turn.request_id === target.attempt.id && ['failed', 'complete', 'interrupted'].includes(turn.status));
+    if (completedAttempt) {
+      if (completedAttempt.status === 'complete') {
+        const submitted = new Set(target.attempt.images.split(','));
+        target.images = target.images.filter(image => !submitted.has(image.localId));
+      }
+      target.attempt = null;
+    }
   } catch (error) {
-    if (generation === sessionGeneration) chatError = error.message;
+    if (generation === sessionGeneration && readGeneration === target.readGeneration) target.error = error.message;
   } finally {
-    if (generation === sessionGeneration) { chatLoading = false; if (authenticated) render(); }
+    if (generation === sessionGeneration && readGeneration === target.readGeneration) { target.loading = false; if (authenticated && target === chat) render(); }
   }
 }
 
 function renderMessages() {
   const statusLabel = { pending: '舊預覽，請重新提出要求後確認', applied: '已確認並完成', applying: '執行中，請核對庫存',
     failed: '執行未全部完成，請核對庫存', expired: '預覽已過期', dismissed: '已取消' };
-  return messages.map(item => `<div class="message ${item.role === 'user' ? 'user' : 'assistant'}"><span class="message-label">${item.role === 'user' ? '你' : '家庭管家'}${item.at ? ` · ${esc(formatTime(item.at))}` : ''}${item.local ? ' · 保存尚未確認' : ''}</span>${esc(item.content)}${item.images?.length ? `<div class="message-images">${item.images.map((image, index) => `<a href="${esc(image.url)}" target="_blank" rel="noopener"><img src="${esc(image.url)}" alt="對話圖片 ${index + 1}" loading="lazy"></a>`).join('')}</div>` : ''}${item.preview ? `<p class="subtitle">${esc(item.preview.summary)}<br>${esc(item.preview.status === 'pending' && proposal?.id === item.preview.id ? '等待下方確認' : statusLabel[item.preview.status] || '請核對家庭記錄')}。歷史預覽不會自動執行。</p>` : ''}</div>`).join('');
+  return chat.messages.map(item => `<div class="message ${item.role === 'user' ? 'user' : 'assistant'}"><span class="message-label">${item.role === 'user' ? '你' : '家庭管家'}${item.at ? ` · ${esc(formatTime(item.at))}` : ''}${item.local ? ' · 保存尚未確認' : ''}</span>${esc(item.content)}${item.images?.length ? `<div class="message-images">${item.images.map((image, index) => `<a href="${esc(image.url)}" target="_blank" rel="noopener"><img src="${esc(image.url)}" alt="對話圖片 ${index + 1}" loading="lazy"></a>`).join('')}</div>` : ''}${item.preview ? `<p class="subtitle">${esc(item.preview.summary)}<br>${esc(item.preview.status === 'pending' && chat.proposal?.id === item.preview.id ? '等待下方確認' : statusLabel[item.preview.status] || '請核對家庭記錄')}。歷史預覽不會自動執行。</p>` : ''}</div>`).join('');
 }
 
 function datePlus(date, days) {
@@ -193,13 +323,13 @@ function reminders() {
 function updateChatImages() {
   const composer = $('#chat-form');
   if (!composer) return;
-  const preparing = chatImages.some(image => image.pending);
+  const preparing = chat.images.some(image => image.pending);
   const preview = composer.querySelector('[data-chat-images]');
-  if (preview) preview.innerHTML = chatImages.map(image => `<div class="chat-image-preview">${image.pending ? '<span role="status">正在縮圖…</span>' : `<img src="data:${esc(image.mime_type)};base64,${image.data}" alt="待傳送圖片">`}<button type="button" data-chat-remove="${esc(image.localId)}" aria-label="移除圖片" ${chatBusy ? 'disabled' : ''}>×</button></div>`).join('');
+  if (preview) preview.innerHTML = chat.images.map(image => `<div class="chat-image-preview">${image.pending ? '<span role="status">正在縮圖…</span>' : `<img src="data:${esc(image.mime_type)};base64,${image.data}" alt="待傳送圖片">`}<button type="button" data-chat-remove="${esc(image.localId)}" aria-label="移除圖片" ${chat.busy ? 'disabled' : ''}>×</button></div>`).join('');
   const input = composer.querySelector('textarea');
-  input.required = !chatImages.length;
-  composer.querySelector('[type="submit"]').disabled = !state?.ai?.enabled || chatBusy || preparing;
-  composer.querySelector('[data-chat-file]').disabled = chatBusy || chatImages.length >= CHAT_IMAGES.count;
+  input.required = !chat.images.length;
+  composer.querySelector('[type="submit"]').disabled = !state?.ai?.enabled || chat.busy || preparing;
+  composer.querySelector('[data-chat-file]').disabled = chat.busy || chat.images.length >= CHAT_IMAGES.count;
 }
 
 async function prepareChatImage(file) {
@@ -222,24 +352,25 @@ async function prepareChatImage(file) {
   } finally { bitmap.close(); }
 }
 
-async function addChatImages(files) {
+async function addChatImages(files, target = chat) {
   const generation = sessionGeneration;
-  if (chatBusy) return;
+  // A native file picker may deliver its change event after logout removed its view.
+  if (!authenticated || ![...conversationStates.values()].includes(target) || target.busy) return;
   for (const file of files) {
     if (generation !== sessionGeneration) return;
-    if (chatImages.length >= CHAT_IMAGES.count) { notify('每次最多附上 4 張圖片。', true); break; }
+    if (target.images.length >= CHAT_IMAGES.count) { notify('每次最多附上 4 張圖片。', true); break; }
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > CHAT_IMAGES.rawBytes) { notify('僅接受 PNG、JPEG、WebP 圖片，原檔每張最多 20 MiB；不支援 PDF 或其他檔案。', true); continue; }
     const image = { localId: crypto.randomUUID?.() || String(Date.now()) + Math.random(), pending: true };
-    chatImages.push(image); updateChatImages();
+    target.images.push(image); if (target === chat) updateChatImages();
     try {
       const prepared = await prepareChatImage(file);
       if (generation !== sessionGeneration) return;
       Object.assign(image, prepared, { pending: false });
     } catch (error) {
       if (generation !== sessionGeneration) return;
-      chatImages = chatImages.filter(value => value !== image);
-      notify(error.message || '無法處理這張圖片，請重新選圖。', true);
-    } finally { if (generation === sessionGeneration) updateChatImages(); }
+      target.images = target.images.filter(value => value !== image);
+      if (target === chat) notify(error.message || '無法處理這張圖片，請重新選圖。', true);
+    } finally { if (generation === sessionGeneration && target === chat) updateChatImages(); }
   }
 }
 
@@ -255,7 +386,8 @@ function fitChatInput(input = $('#chat-message')) {
 }
 
 function syncChatInput(input) {
-  chatDraft = input.value;
+  const target = [...conversationStates.values()].find(value => value.localKey === input.dataset.conversation);
+  if (target) target.draft = input.value;
   fitChatInput(input);
 }
 
@@ -267,7 +399,7 @@ function renderChatInPlace(input) {
   next.innerHTML = renderChat();
   const nextComposer = next.querySelector('#chat-form');
   for (const child of [...layout.children]) if (child !== composer) child.remove();
-  for (const child of [...next.firstElementChild.children]) if (child !== nextComposer) composer.before(child);
+  for (const child of [...next.querySelector('.chat-layout').children]) if (child !== nextComposer) composer.before(child);
   input.disabled = nextComposer.querySelector('textarea').disabled;
   composer.querySelector('[type="submit"]').disabled = nextComposer.querySelector('[type="submit"]').disabled;
   composer.querySelector('.chat-footnote').textContent = nextComposer.querySelector('.chat-footnote').textContent;
@@ -284,6 +416,7 @@ function renderChatInPlace(input) {
   }
   const updated = app.querySelector('.last-updated');
   if (lastUpdated && updated) updated.textContent = `更新 ${new Intl.DateTimeFormat('zh-TW', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Taipei', hour12: false }).format(lastUpdated)}`;
+  updateConversationPanels();
   bindPage();
   updateChatImages();
   fitChatInput(input);
@@ -304,8 +437,8 @@ function render() {
   const draftInput = $('#chat-message');
   const restoreChatFocus = draftInput && document.activeElement === draftInput;
   const selection = draftInput ? [draftInput.selectionStart, draftInput.selectionEnd] : null;
-  if (draftInput) chatDraft = draftInput.value;
-  if (activeTab === 'chat' && state && draftInput) { renderChatInPlace(draftInput); return; }
+  if (draftInput && draftInput.dataset.conversation === chat.localKey) chat.draft = draftInput.value;
+  if (activeTab === 'chat' && state && draftInput && draftInput.dataset.conversation === chat.localKey) { renderChatInPlace(draftInput); return; }
   const connected = !!state?.grocy?.connected && !stateError;
   const today = state?.today;
   const dateLabel = today ? new Intl.DateTimeFormat('zh-TW', { month: 'long', day: 'numeric', weekday: 'long', timeZone: 'Asia/Taipei' }).format(new Date(`${today}T12:00:00+08:00`)) : '我們的家的筆記';
@@ -325,7 +458,7 @@ function render() {
   }
   const currentInput = $('#chat-message');
   if (currentInput) {
-    currentInput.value = chatDraft;
+    currentInput.value = chat.draft;
     fitChatInput(currentInput);
     if (restoreChatFocus && !currentInput.disabled) { currentInput.focus({ preventScroll: true }); currentInput.setSelectionRange(...selection); }
   }
@@ -403,7 +536,7 @@ function renderProposalActions(actions) {
 
 function renderChat() {
   const enabled = !!state.ai?.enabled;
-  return `<div class="chat-layout"><div class="title-row"><div><h1>問問家庭管家</h1><p class="subtitle">找東西、想菜單，或順手記下生活小事。</p></div></div>${!enabled ? '<div class="banner" role="status">AI 尚未設定。食材與物品記錄、採買和維護功能仍可正常使用。</div>' : ''}<section class="chat-welcome"><div class="icon-tile">${icon('chat')}</div><h2>今天有什麼需要幫忙的？</h2><p class="subtitle">自然地說就好。要修改記錄時，<br>管家會先讓你確認，再動手記下來。</p><div class="chips"><button class="chip" data-prompt="查牛奶" ${enabled ? '' : 'disabled'}>查牛奶</button><button class="chip" data-prompt="買兩瓶洗衣精" ${enabled ? '' : 'disabled'}>買兩瓶洗衣精</button><button class="chip" data-prompt="找延長線" ${enabled ? '' : 'disabled'}>找延長線</button></div></section>${chatError ? `<div class="banner" role="alert">對話保存或讀取尚未確認：${esc(chatError)}</div>` : ''}<div class="section-header"><button class="text-button" data-chat-refresh ${chatLoading || chatBusy ? 'disabled' : ''}>${chatLoading ? '正在讀取對話…' : '更新對話'}</button>${chatBefore ? `<button class="text-button" data-chat-older ${chatLoading ? 'disabled' : ''}>載入更早的對話</button>` : ''}</div><div class="messages" aria-live="polite" aria-relevant="additions">${renderMessages()}</div>${chatBusy ? '<div class="busy-text loading" role="status">管家正在翻閱家的筆記…</div>' : ''}${proposal ? `<section class="proposal" aria-label="待確認的變更"><h3>${icon('check')} 先確認，再記錄</h3><p>請核對以下實際將變更的物品與數量：</p>${renderProposalActions(proposal.actions)}<p class="proposal-summary">補充說明：${esc(proposal.summary)}</p><small>共 ${Array.isArray(proposal.actions) ? proposal.actions.length : 0} 項變更。確認後才會更新家的記錄。</small><button class="button" data-apply="${esc(proposal.id)}" ${chatBusy ? 'disabled' : ''}>確認記錄</button> <button class="button ghost" data-dismiss ${chatBusy ? 'disabled' : ''}>先不要</button></section>` : ''}<form id="chat-form" class="chat-compose"><div class="chat-image-list" data-chat-images></div><div class="chat-image-tools"><button type="button" class="text-button" data-chat-file>加入圖片</button><input type="file" data-chat-files accept="image/png,image/jpeg,image/webp" multiple hidden aria-label="選擇對話圖片"><small>可貼上圖片；最多 4 張，原圖會在本機縮小後傳送給 Gemini。</small></div><div class="compose-box"><textarea id="chat-message" name="message" rows="1" maxlength="4000" aria-label="給家庭管家的訊息" placeholder="例如：今天買了兩瓶洗衣精…" required ${!enabled || chatBusy ? 'disabled' : ''}></textarea><button class="button" type="submit" aria-label="傳送訊息" ${!enabled || chatBusy ? 'disabled' : ''}>${icon('send')}</button></div><p class="chat-footnote">${chatPersistent ? '對話保存在本機，登入本家庭即可共用與回看。' : '正在確認對話保存狀態。'}庫存與採買以家的實際記錄為準。</p></form></div>`;
+  return `<div class="chat-workspace"><aside class="conversation-panel" aria-label="歷史對話">${renderConversationList()}</aside><div class="chat-layout"><div class="conversation-mobile-tools"><button class="button ghost" data-conversation-drawer>歷史對話</button><button class="button" data-conversation-new ${conversationsLoading ? 'disabled' : ''}>新增對話</button></div><div class="title-row"><div><h1>問問家庭管家</h1><p class="subtitle">找東西、想菜單，或順手記下生活小事。</p></div></div>${!enabled ? '<div class="banner" role="status">AI 尚未設定。食材與物品記錄、採買和維護功能仍可正常使用。</div>' : ''}<section class="chat-welcome"><div class="icon-tile">${icon('chat')}</div><h2>今天有什麼需要幫忙的？</h2><p class="subtitle">自然地說就好。要修改記錄時，<br>管家會先讓你確認，再動手記下來。</p><div class="chips"><button class="chip" data-prompt="查牛奶" ${enabled ? '' : 'disabled'}>查牛奶</button><button class="chip" data-prompt="買兩瓶洗衣精" ${enabled ? '' : 'disabled'}>買兩瓶洗衣精</button><button class="chip" data-prompt="找延長線" ${enabled ? '' : 'disabled'}>找延長線</button></div></section>${chat.error ? `<div class="banner" role="alert">對話保存或讀取尚未確認：${esc(chat.error)}</div>` : ''}<div class="section-header"><button class="text-button" data-chat-refresh ${chat.loading || chat.busy ? 'disabled' : ''}>${chat.loading ? '正在讀取對話…' : '更新對話'}</button>${chat.before ? `<button class="text-button" data-chat-older ${chat.loading ? 'disabled' : ''}>載入更早的對話</button>` : ''}</div><div class="messages" aria-live="polite" aria-relevant="additions">${renderMessages()}</div>${chat.busy ? '<div class="busy-text loading" role="status">管家正在翻閱家的筆記…</div>' : ''}${chat.proposal ? `<section class="proposal" aria-label="待確認的變更"><h3>${icon('check')} 先確認，再記錄</h3><p>請核對以下實際將變更的物品與數量：</p>${renderProposalActions(chat.proposal.actions)}<p class="proposal-summary">補充說明：${esc(chat.proposal.summary)}</p><small>共 ${Array.isArray(chat.proposal.actions) ? chat.proposal.actions.length : 0} 項變更。確認後才會更新家的記錄。</small><button class="button" data-apply="${esc(chat.proposal.id)}" ${chat.busy ? 'disabled' : ''}>確認記錄</button> <button class="button ghost" data-dismiss ${chat.busy ? 'disabled' : ''}>先不要</button></section>` : ''}<form id="chat-form" class="chat-compose"><div class="chat-image-list" data-chat-images></div><div class="chat-image-tools"><button type="button" class="text-button" data-chat-file>加入圖片</button><input type="file" data-chat-files accept="image/png,image/jpeg,image/webp" multiple hidden aria-label="選擇對話圖片"><small>可貼上圖片；最多 4 張，原圖會在本機縮小後傳送給 Gemini。</small></div><div class="compose-box"><textarea id="chat-message" data-conversation="${esc(chat.localKey)}" name="message" rows="1" maxlength="4000" aria-label="給家庭管家的訊息" placeholder="例如：今天買了兩瓶洗衣精…" required ${!enabled || chat.busy ? 'disabled' : ''}></textarea><button class="button" type="submit" aria-label="傳送訊息" ${!enabled || chat.busy ? 'disabled' : ''}>${icon('send')}</button></div><p class="chat-footnote">${chat.persistent ? '對話保存在本機，登入本家庭即可共用與回看。' : '正在確認對話保存狀態。'}庫存與採買以家的實際記錄為準。</p></form></div></div>`;
 }
 
 function bindShell() {
@@ -428,6 +561,7 @@ function bindShell() {
 }
 
 function bindPage() {
+  bindConversationControls(app);
   bindLocationLinks(app);
   app.querySelectorAll('[data-add]').forEach(button => button.addEventListener('click', () => editItem()));
   app.querySelectorAll('[data-edit]').forEach(button => button.addEventListener('click', () => editItem(state.items.find(item => item.id === Number(button.dataset.edit)))));
@@ -457,7 +591,8 @@ function bindPage() {
   const chatInput = $('#chat-message');
   if (chatInput && !chatInput.dataset.bound) {
     chatInput.dataset.bound = 'true';
-    chatComposing = false;
+    const editingTarget = chat;
+    editingTarget.composing = false;
     $('#chat-form').addEventListener('submit', sendChat);
     const sync = () => syncChatInput(chatInput);
     const afterNativeEdit = () => requestAnimationFrame(() => { if (chatInput.isConnected) sync(); });
@@ -467,29 +602,33 @@ function bindPage() {
     chatInput.addEventListener('beforeinput', afterNativeEdit);
     chatInput.addEventListener('paste', event => {
       const files = [...(event.clipboardData?.items || [])].filter(item => item.kind === 'file' && item.type.startsWith('image/')).map(item => item.getAsFile()).filter(Boolean);
-      if (files.length) addChatImages(files);
+      if (files.length) addChatImages(files, editingTarget);
       afterNativeEdit(); // Keep native text paste, including mixed text/image clipboards.
     });
     const composer = chatInput.closest('form');
     composer.querySelector('[data-chat-file]').addEventListener('click', () => composer.querySelector('[data-chat-files]').click());
-    composer.querySelector('[data-chat-files]').addEventListener('change', event => { const files = [...event.target.files]; event.target.value = ''; addChatImages(files); });
+    composer.querySelector('[data-chat-files]').addEventListener('change', event => { const files = [...event.target.files]; event.target.value = ''; addChatImages(files, editingTarget); });
     composer.querySelector('[data-chat-images]').addEventListener('click', event => {
       const remove = event.target.closest('[data-chat-remove]');
-      if (!remove || chatBusy) return;
-      chatImages = chatImages.filter(image => image.localId !== remove.dataset.chatRemove);
+      if (!remove || chat.busy) return;
+      chat.images = chat.images.filter(image => image.localId !== remove.dataset.chatRemove);
       updateChatImages();
     });
-    chatInput.addEventListener('compositionstart', () => { chatComposing = true; });
-    chatInput.addEventListener('compositionend', () => { chatComposing = false; sync(); afterNativeEdit(); });
+    chatInput.addEventListener('compositionstart', () => { editingTarget.composing = true; });
+    chatInput.addEventListener('compositionend', () => { editingTarget.composing = false; sync(); afterNativeEdit(); });
     chatInput.addEventListener('keydown', event => {
-      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !chatComposing && event.keyCode !== 229) {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !chat.composing && event.keyCode !== 229) {
         event.preventDefault(); $('#chat-form').requestSubmit();
       }
     });
   }
   app.querySelector('[data-dismiss]')?.addEventListener('click', async () => {
-    try { await request(API.dismissProposal(proposal.id), {}); proposal = null; await loadChat(); }
-    catch (error) { notify(error.message, true); }
+    const target = chat, generation = sessionGeneration;
+    try {
+      await request(API.dismissProposal(target.proposal.id), {});
+      if (generation !== sessionGeneration) return;
+      target.proposal = null; await loadChat({ target });
+    } catch (error) { if (generation === sessionGeneration && target === chat) notify(error.message, true); }
   });
   app.querySelector('[data-apply]')?.addEventListener('click', applyProposal);
 }
@@ -654,67 +793,72 @@ function shoppingAddDialog() {
 
 async function sendChat(event) {
   event.preventDefault();
+  const target = chat;
   const input = $('#chat-message');
   const text = input.value.trim();
-  if ((!text && !chatImages.length) || chatImages.some(image => image.pending) || chatBusy || chatComposing || !state.ai?.enabled) return;
+  if ((!text && !target.images.length) || target.images.some(image => image.pending) || target.busy || target.composing || !state.ai?.enabled) return;
   const generation = sessionGeneration;
-  const imageKeys = chatImages.map(image => image.localId).join(',');
-  if (!chatAttempt || chatAttempt.text !== text || chatAttempt.images !== imageKeys) chatAttempt = { text, images: imageKeys, id: crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(24)), byte => byte.toString(16).padStart(2, '0')).join('') };
-  const requestId = chatAttempt.id;
-  if (!messages.some(message => message.id === `${requestId}:user`)) messages.push({ id: `${requestId}:user`, request_id: requestId, role: 'user', content: text, local: true });
+  const imageKeys = target.images.map(image => image.localId).join(',');
+  if (!target.attempt || target.attempt.text !== text || target.attempt.images !== imageKeys) target.attempt = { text, images: imageKeys, id: crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(24)), byte => byte.toString(16).padStart(2, '0')).join('') };
+  const requestId = target.attempt.id;
+  if (!target.messages.some(message => message.id === `${requestId}:user`)) target.messages.push({ id: `${requestId}:user`, request_id: requestId, role: 'user', content: text, local: true });
   input.value = '';
-  chatDraft = '';
-  proposal = null;
-  chatBusy = true;
+  target.draft = '';
+  target.proposal = null;
+  target.busy = true;
   render();
   try {
-    const response = await request(API.chat, { message: text, request_id: requestId, images: chatImages.map(({ mime_type, data }) => ({ mime_type, data })) });
+    await ensureConversation(target);
+    if (generation !== sessionGeneration) return;
+    const response = await request(API.chat, { conversation_id: target.id, message: text, request_id: requestId, images: target.images.map(({ mime_type, data }) => ({ mime_type, data })) });
     if (generation !== sessionGeneration) return;
     if (response.status === 'complete') {
-      messages = messages.map(message => message.id === `${requestId}:user` ? { ...message, local: false } : message);
-      proposal = response.proposal || null;
-      chatAttempt = null;
-      chatImages = [];
-    } else if (response.status === 'processing') { input.value = text; chatDraft = text; }
-    await loadChat();
+      target.messages = target.messages.map(message => message.id === `${requestId}:user` ? { ...message, local: false } : message);
+      target.proposal = response.proposal || null;
+      target.attempt = null;
+      target.images = [];
+    } else if (response.status === 'processing') { if (input.isConnected && target === chat) input.value = text; target.draft = text; }
+    await loadChat({ target });
   } catch (error) {
     if (generation !== sessionGeneration) return;
     // A lost response does not prove a failed write. Read back before offering a retry.
-    await loadChat();
+    await loadChat({ target });
     if (generation !== sessionGeneration) return;
-    chatError = error.message;
-    if (!messages.some(message => message.id === `${requestId}:assistant` && message.status === 'complete')) {
-      chatDraft = text;
+    target.error = error.message;
+    if (!target.messages.some(message => message.id === `${requestId}:assistant` && message.status === 'complete')) {
+      target.draft = text;
       const currentInput = $('#chat-message');
-      if (currentInput && !currentInput.value) { currentInput.value = text; fitChatInput(currentInput); }
+      if (target === chat && currentInput && !currentInput.value) { currentInput.value = text; fitChatInput(currentInput); }
     }
   } finally {
     if (generation === sessionGeneration) {
-      chatBusy = false;
-      render();
-      if (activeTab === 'chat') { $('#chat-message')?.focus(); $('.chat-compose')?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }
+      target.busy = false;
+      await loadConversations();
+      if (target === chat) render();
+      if (target === chat && activeTab === 'chat') { $('#chat-message')?.focus(); $('.chat-compose')?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }
     }
   }
 }
 
 async function applyProposal() {
-  if (!proposal || chatBusy) return;
+  const target = chat;
+  if (!target.proposal || target.busy) return;
   const generation = sessionGeneration;
-  const proposalId = proposal.id;
-  chatBusy = true;
+  const proposalId = target.proposal.id;
+  target.busy = true;
   render();
   try {
     const result = await request(API.applyProposal(proposalId), {});
     if (generation !== sessionGeneration) return;
-    proposal = null;
+    target.proposal = null;
     notify(result.message || '已確認並更新家的記錄。');
-    await loadChat();
+    await loadChat({ target });
     await loadState();
   } catch (error) {
     if (generation !== sessionGeneration) return;
     notify(error.message, true);
   } finally {
-    if (generation === sessionGeneration) { chatBusy = false; render(); }
+    if (generation === sessionGeneration) { target.busy = false; if (target === chat) render(); }
   }
 }
 
@@ -722,7 +866,7 @@ async function start() {
   try {
     const session = await (await api(API.session)).json();
     if (!session.authenticated) renderLogin('', session.configured);
-    else { authenticated = true; await loadState(); await loadChat(); }
+    else { authenticated = true; await loadState(); await loadConversations({ initial: true }); await loadChat(); }
   } catch (error) {
     app.innerHTML = `<main class="login-page"><section class="login-card"><h1>暫時還沒連上家</h1><p class="subtitle">${esc(error.message || '請確認網路後再試。')}</p><button class="button" id="retry" style="margin-top:20px">再連一次</button></section></main>`;
     $('#retry').addEventListener('click', start);
@@ -733,7 +877,7 @@ async function start() {
 // deliberately bypass this gate, including after a failed automatic read.
 function refreshWhenReturning(debounce = true) {
   clearTimeout(automaticRefreshTimer);automaticRefreshTimer=null;
-  if (document.visibilityState !== 'visible' || !authenticated || busy || chatBusy || dialog.open) return;
+  if (document.visibilityState !== 'visible' || !authenticated || busy || chat.busy || dialog.open) return;
   if (automaticRefresh) return automaticRefresh;
   if ([lastUpdated?.getTime(),lastStateAttempt].some(at=>at!=null&&Date.now()-at<AUTO_REFRESH_MS)) return;
   if (debounce) { automaticRefreshTimer=setTimeout(()=>refreshWhenReturning(false),180);return; }

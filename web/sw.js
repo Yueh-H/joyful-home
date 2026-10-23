@@ -1,4 +1,4 @@
-const CACHE = 'joyful-home-shell-v3';
+const CACHE = 'joyful-home-shell-v4';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/contracts.js', '/floorplan.js', '/floorplan.css', '/icon.svg', '/manifest.webmanifest'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL.map(path => new Request(path, { cache: 'reload' })))).then(() => self.skipWaiting()));
