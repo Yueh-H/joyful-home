@@ -9,7 +9,7 @@ const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${esc(n
 const category = key => CATEGORIES[key] || { label: '未分類', icon: 'grid', hint: '' };
 const fmt = value => new Intl.NumberFormat('zh-TW', { maximumFractionDigits: 3 }).format(Number(value) || 0);
 const tabs = { today: ['今天', 'home'], inventory: ['家裡有什麼', 'grid'], shopping: ['採買', 'bag'], chat: ['問管家', 'chat'], map: ['家的地圖', 'home'] };
-let activeTab = location.hash === '#map' ? 'map' : 'today';
+let activeTab = tabs[location.hash.slice(1)] ? location.hash.slice(1) : 'today';
 let filter = 'all';
 let search = '';
 let state = null;
@@ -17,6 +17,7 @@ let stateError = '';
 let busy = false;
 let chatBusy = false;
 let messages = [];
+let chatBefore = null, chatError = '', chatPersistent = false, chatLoading = false, chatAttempt = null;
 let proposal = null;
 let sessionGeneration = 0;
 let toastTimer;
@@ -78,6 +79,7 @@ function loggedOut(message = '', configured = true) {
   chatDraft = '';
   state = null;
   messages = [];
+  chatBefore = null; chatError = ''; chatPersistent = false; chatLoading = false; chatAttempt = null;
   proposal = null;
   chatBusy = false;
   busy = false;
@@ -101,6 +103,7 @@ function renderLogin(message = '', configured = true) {
       authenticated = true;
       form.reset();
       await loadState();
+      await loadChat();
     } catch (error) {
       form.querySelector('.login-error').textContent = error.message;
       button.disabled = false;
@@ -128,6 +131,42 @@ async function loadState({ background = false } = {}) {
   } finally {
     if (generation === sessionGeneration) { lastStateAttempt=Date.now();busy = false; render(); }
   }
+}
+
+async function loadChat({ older = false } = {}) {
+  const generation = sessionGeneration;
+  chatLoading = true;
+  chatError = '';
+  try {
+    const path = API.chat + (older && chatBefore ? `?before=${encodeURIComponent(chatBefore)}` : '');
+    const data = await (await api(path)).json();
+    if (generation !== sessionGeneration) return;
+    chatPersistent = data.persistent;
+    chatBefore = data.before;
+    const loaded = data.turns.flatMap(turn => {
+      const user = { id: `${turn.request_id}:user`, request_id: turn.request_id, role: 'user', content: turn.message,
+        at: turn.created_at, order: turn.order, status: turn.status };
+      const reply = turn.reply || (turn.status === 'failed' ? `這次回覆未完成：${turn.error}` :
+        turn.status === 'interrupted' ? '訊息已保存，但回覆中斷。請重新提出要求。' : '訊息已保存，回覆尚未完成。稍後按「更新對話」查看；若中斷可重新提出要求。');
+      return [user, { id: `${turn.request_id}:assistant`, request_id: turn.request_id, role: 'assistant', content: reply,
+        at: turn.finished_at, order: turn.order, status: turn.status, preview: turn.proposal }];
+    });
+    const merged = new Map(messages.map(message => [message.id, message]));
+    loaded.forEach(message => merged.set(message.id, message));
+    messages = [...merged.values()].sort((a, b) => (a.order || '~').localeCompare(b.order || '~') || (a.role === 'user' ? -1 : 1));
+    if (proposal && loaded.some(message => message.preview?.id === proposal.id && message.preview.status !== 'pending')) proposal = null;
+    if (chatAttempt && data.turns.some(turn => turn.request_id === chatAttempt.id && ['failed', 'complete', 'interrupted'].includes(turn.status))) chatAttempt = null;
+  } catch (error) {
+    if (generation === sessionGeneration) chatError = error.message;
+  } finally {
+    if (generation === sessionGeneration) { chatLoading = false; if (authenticated) render(); }
+  }
+}
+
+function renderMessages() {
+  const statusLabel = { pending: '舊預覽，請重新提出要求後確認', applied: '已確認並完成', applying: '執行中，請核對庫存',
+    failed: '執行未全部完成，請核對庫存', expired: '預覽已過期', dismissed: '已取消' };
+  return messages.map(item => `<div class="message ${item.role === 'user' ? 'user' : 'assistant'}"><span class="message-label">${item.role === 'user' ? '你' : '家庭管家'}${item.at ? ` · ${esc(formatTime(item.at))}` : ''}${item.local ? ' · 保存尚未確認' : ''}</span>${esc(item.content)}${item.preview ? `<p class="subtitle">${esc(item.preview.summary)}<br>${esc(item.preview.status === 'pending' && proposal?.id === item.preview.id ? '等待下方確認' : statusLabel[item.preview.status] || '請核對家庭記錄')}。歷史預覽不會自動執行。</p>` : ''}</div>`).join('');
 }
 
 function datePlus(date, days) {
@@ -253,11 +292,11 @@ function renderProposalActions(actions) {
 
 function renderChat() {
   const enabled = !!state.ai?.enabled;
-  return `<div class="chat-layout"><div class="title-row"><div><h1>問問家庭管家</h1><p class="subtitle">找東西、想菜單，或順手記下生活小事。</p></div></div>${!enabled ? '<div class="banner" role="status">AI 尚未設定。食材與物品記錄、採買和維護功能仍可正常使用。</div>' : ''}<section class="chat-welcome"><div class="icon-tile">${icon('chat')}</div><h2>今天有什麼需要幫忙的？</h2><p class="subtitle">自然地說就好。要修改記錄時，<br>管家會先讓你確認，再動手記下來。</p><div class="chips"><button class="chip" data-prompt="查牛奶" ${enabled ? '' : 'disabled'}>查牛奶</button><button class="chip" data-prompt="買兩瓶洗衣精" ${enabled ? '' : 'disabled'}>買兩瓶洗衣精</button><button class="chip" data-prompt="找延長線" ${enabled ? '' : 'disabled'}>找延長線</button></div></section><div class="messages" aria-live="polite" aria-relevant="additions">${messages.map(item => `<div class="message ${item.role === 'user' ? 'user' : 'assistant'}"><span class="message-label">${item.role === 'user' ? '你' : '家庭管家'}</span>${esc(item.content)}</div>`).join('')}</div>${chatBusy ? '<div class="busy-text loading" role="status">管家正在翻閱家的筆記…</div>' : ''}${proposal ? `<section class="proposal" aria-label="待確認的變更"><h3>${icon('check')} 先確認，再記錄</h3><p>請核對以下實際將變更的物品與數量：</p>${renderProposalActions(proposal.actions)}<p class="proposal-summary">補充說明：${esc(proposal.summary)}</p><small>共 ${Array.isArray(proposal.actions) ? proposal.actions.length : 0} 項變更。確認後才會更新家的記錄。</small><button class="button" data-apply="${esc(proposal.id)}" ${chatBusy ? 'disabled' : ''}>確認記錄</button> <button class="button ghost" data-dismiss ${chatBusy ? 'disabled' : ''}>先不要</button></section>` : ''}<form id="chat-form" class="chat-compose"><div class="compose-box"><textarea id="chat-message" name="message" rows="1" maxlength="4000" aria-label="給家庭管家的訊息" placeholder="例如：今天買了兩瓶洗衣精…" required ${!enabled || chatBusy ? 'disabled' : ''}></textarea><button class="button" type="submit" aria-label="傳送訊息" ${!enabled || chatBusy ? 'disabled' : ''}>${icon('send')}</button></div><p class="chat-footnote">對話僅保留在本次頁面。庫存與採買以家的實際記錄為準。</p></form></div>`;
+  return `<div class="chat-layout"><div class="title-row"><div><h1>問問家庭管家</h1><p class="subtitle">找東西、想菜單，或順手記下生活小事。</p></div></div>${!enabled ? '<div class="banner" role="status">AI 尚未設定。食材與物品記錄、採買和維護功能仍可正常使用。</div>' : ''}<section class="chat-welcome"><div class="icon-tile">${icon('chat')}</div><h2>今天有什麼需要幫忙的？</h2><p class="subtitle">自然地說就好。要修改記錄時，<br>管家會先讓你確認，再動手記下來。</p><div class="chips"><button class="chip" data-prompt="查牛奶" ${enabled ? '' : 'disabled'}>查牛奶</button><button class="chip" data-prompt="買兩瓶洗衣精" ${enabled ? '' : 'disabled'}>買兩瓶洗衣精</button><button class="chip" data-prompt="找延長線" ${enabled ? '' : 'disabled'}>找延長線</button></div></section>${chatError ? `<div class="banner" role="alert">對話保存或讀取尚未確認：${esc(chatError)}</div>` : ''}<div class="section-header"><button class="text-button" data-chat-refresh ${chatLoading || chatBusy ? 'disabled' : ''}>${chatLoading ? '正在讀取對話…' : '更新對話'}</button>${chatBefore ? `<button class="text-button" data-chat-older ${chatLoading ? 'disabled' : ''}>載入更早的對話</button>` : ''}</div><div class="messages" aria-live="polite" aria-relevant="additions">${renderMessages()}</div>${chatBusy ? '<div class="busy-text loading" role="status">管家正在翻閱家的筆記…</div>' : ''}${proposal ? `<section class="proposal" aria-label="待確認的變更"><h3>${icon('check')} 先確認，再記錄</h3><p>請核對以下實際將變更的物品與數量：</p>${renderProposalActions(proposal.actions)}<p class="proposal-summary">補充說明：${esc(proposal.summary)}</p><small>共 ${Array.isArray(proposal.actions) ? proposal.actions.length : 0} 項變更。確認後才會更新家的記錄。</small><button class="button" data-apply="${esc(proposal.id)}" ${chatBusy ? 'disabled' : ''}>確認記錄</button> <button class="button ghost" data-dismiss ${chatBusy ? 'disabled' : ''}>先不要</button></section>` : ''}<form id="chat-form" class="chat-compose"><div class="compose-box"><textarea id="chat-message" name="message" rows="1" maxlength="4000" aria-label="給家庭管家的訊息" placeholder="例如：今天買了兩瓶洗衣精…" required ${!enabled || chatBusy ? 'disabled' : ''}></textarea><button class="button" type="submit" aria-label="傳送訊息" ${!enabled || chatBusy ? 'disabled' : ''}>${icon('send')}</button></div><p class="chat-footnote">${chatPersistent ? '對話保存在本機，登入本家庭即可共用與回看。' : '正在確認對話保存狀態。'}庫存與採買以家的實際記錄為準。</p></form></div>`;
 }
 
 function bindShell() {
-  app.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => { const nextTab=button.dataset.tab;if(activeTab==='map'&&nextTab!=='map'&&!floorplan.canLeave())return;activeTab = nextTab; history.replaceState(null, '', activeTab === 'map' ? '#map' : location.pathname + location.search); render(); window.scrollTo({ top: 0, behavior: 'instant' }); }));
+  app.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => { const nextTab=button.dataset.tab;if(activeTab==='map'&&nextTab!=='map'&&!floorplan.canLeave())return;activeTab = nextTab; history.replaceState(null, '', `#${activeTab}`); render(); if (activeTab === 'chat') loadChat(); window.scrollTo({ top: 0, behavior: 'instant' }); }));
   app.querySelectorAll('[data-refresh]').forEach(button => button.addEventListener('click', () => { if (!busy) loadState(); }));
   app.querySelectorAll('[data-logout]').forEach(button => button.addEventListener('click', async () => {
     button.disabled = true;
@@ -302,11 +341,16 @@ function bindPage() {
   app.querySelectorAll('[data-prompt]').forEach(button => button.addEventListener('click', () => {
     const input = $('#chat-message'); input.value = button.dataset.prompt; input.focus();
   }));
+  app.querySelector('[data-chat-refresh]')?.addEventListener('click', () => loadChat());
+  app.querySelector('[data-chat-older]')?.addEventListener('click', () => loadChat({ older: true }));
   $('#chat-form')?.addEventListener('submit', sendChat);
   $('#chat-message')?.addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('#chat-form').requestSubmit(); }
   });
-  app.querySelector('[data-dismiss]')?.addEventListener('click', () => { proposal = null; render(); });
+  app.querySelector('[data-dismiss]')?.addEventListener('click', async () => {
+    try { await request(API.dismissProposal(proposal.id), {}); proposal = null; await loadChat(); }
+    catch (error) { notify(error.message, true); }
+  });
   app.querySelector('[data-apply]')?.addEventListener('click', applyProposal);
 }
 
@@ -473,22 +517,31 @@ async function sendChat(event) {
   const input = $('#chat-message');
   const text = input.value.trim();
   if (!text || chatBusy || !state.ai?.enabled) return;
-  const history = messages.slice(-16).map(({ role, content }) => ({ role, content }));
   const generation = sessionGeneration;
-  messages.push({ role: 'user', content: text });
+  if (!chatAttempt || chatAttempt.text !== text) chatAttempt = { text, id: crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(24)), byte => byte.toString(16).padStart(2, '0')).join('') };
+  const requestId = chatAttempt.id;
+  if (!messages.some(message => message.id === `${requestId}:user`)) messages.push({ id: `${requestId}:user`, request_id: requestId, role: 'user', content: text, local: true });
   input.value = '';
   chatDraft = '';
   proposal = null;
   chatBusy = true;
   render();
   try {
-    const response = await request(API.chat, { message: text, history });
+    const response = await request(API.chat, { message: text, request_id: requestId });
     if (generation !== sessionGeneration) return;
-    messages.push({ role: 'assistant', content: response.reply });
-    proposal = response.proposal || null;
+    if (response.status === 'complete') {
+      messages = messages.map(message => message.id === `${requestId}:user` ? { ...message, local: false } : message);
+      proposal = response.proposal || null;
+      chatAttempt = null;
+    }
+    await loadChat();
   } catch (error) {
     if (generation !== sessionGeneration) return;
-    messages.push({ role: 'assistant', content: `這次沒有完成：${error.message}。你的物品記錄沒有因此變更。` });
+    // A lost response does not prove a failed write. Read back before offering a retry.
+    await loadChat();
+    if (generation !== sessionGeneration) return;
+    chatError = error.message;
+    if (!messages.some(message => message.id === `${requestId}:user` && !message.local)) chatDraft = text;
   } finally {
     if (generation === sessionGeneration) {
       chatBusy = false;
@@ -508,7 +561,8 @@ async function applyProposal() {
     const result = await request(API.applyProposal(proposalId), {});
     if (generation !== sessionGeneration) return;
     proposal = null;
-    messages.push({ role: 'assistant', content: result.message || '已確認並更新家的記錄。' });
+    notify(result.message || '已確認並更新家的記錄。');
+    await loadChat();
     await loadState();
   } catch (error) {
     if (generation !== sessionGeneration) return;
@@ -522,7 +576,7 @@ async function start() {
   try {
     const session = await (await api(API.session)).json();
     if (!session.authenticated) renderLogin('', session.configured);
-    else { authenticated = true; await loadState(); }
+    else { authenticated = true; await loadState(); await loadChat(); }
   } catch (error) {
     app.innerHTML = `<main class="login-page"><section class="login-card"><h1>暫時還沒連上家</h1><p class="subtitle">${esc(error.message || '請確認網路後再試。')}</p><button class="button" id="retry" style="margin-top:20px">再連一次</button></section></main>`;
     $('#retry').addEventListener('click', start);
@@ -542,6 +596,6 @@ function refreshWhenReturning(debounce = true) {
 }
 document.addEventListener('visibilitychange', refreshWhenReturning);
 window.addEventListener('focus', refreshWhenReturning);
-window.addEventListener('hashchange', () => { if(!authenticated)return;const nextTab=location.hash==='#map'?'map':activeTab==='map'?'today':activeTab;if(activeTab==='map'&&nextTab!=='map'&&!floorplan.canLeave()){history.replaceState(null,'','#map');return;}if(nextTab!==activeTab){activeTab=nextTab;render();} });
+window.addEventListener('hashchange', () => { if(!authenticated)return;const nextTab=tabs[location.hash.slice(1)]?location.hash.slice(1):'today';if(activeTab==='map'&&nextTab!=='map'&&!floorplan.canLeave()){history.replaceState(null,'','#map');return;}if(nextTab!==activeTab){activeTab=nextTab;render();if(activeTab==='chat')loadChat();} });
 window.addEventListener('beforeunload', event => { if (floorplan.dirty) { event.preventDefault(); event.returnValue = ''; } });
 start();

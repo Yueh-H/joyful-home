@@ -14,7 +14,7 @@ import threading
 import time
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +25,7 @@ from .ai import AIError, Gemini
 from .grocy import Grocy, GrocyError
 from .firestore_inventory import FirestoreInventory, FirestoreInventoryError
 from .mongo_inventory import MongoInventory
+from .chat_store import MongoChat, ChatStoreError
 from .floorplan import register_floorplan
 from .studio_proxy import register_studio_proxy
 
@@ -43,7 +44,7 @@ def fingerprint(state):
     return hashlib.sha256(json.dumps(snapshot, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, studio_url=None, studio_transport=None):
+def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, studio_url=None, studio_transport=None, chat_store=None):
     app = FastAPI(title="愉悅的家庭管家", docs_url=None, redoc_url=None, openapi_url=None)
     backend = os.getenv("INVENTORY_BACKEND", "grocy")
     if grocy is not None:
@@ -58,6 +59,9 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
         raise ValueError("Unsupported inventory backend")
     inventory_backend = getattr(app.state.grocy, "backend", "grocy")
     native_inventory = inventory_backend in {"firestore", "mongodb"}
+    app.state.chat = chat_store if chat_store is not None else (
+        MongoChat(app.state.grocy.collection.database, app.state.grocy.home_id)
+        if isinstance(app.state.grocy, MongoInventory) else None)
     app.state.ai = ai or Gemini()
     household_password = password if password is not None else os.getenv("HOME_PASSWORD", "")
     session_secret = secret if secret is not None else os.getenv("SESSION_SECRET", "")
@@ -166,6 +170,10 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
 
     @app.exception_handler(FirestoreInventoryError)
     async def firestore_error(request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
+
+    @app.exception_handler(ChatStoreError)
+    async def chat_store_error(request, exc):
         return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
 
     @app.exception_handler(AIError)
@@ -383,12 +391,73 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
                     db.execute("UPDATE requests SET status='done',response=? WHERE session=? AND key=?", (json.dumps(result), sid, key))
             return result
 
+    def chat_record(document):
+        store = app.state.chat
+        status = store.status(document)
+        row = {"request_id": document["request_id"], "order": str(document["order"]).zfill(20),
+               "status": status, "created_at": document["created_at"], "message": document["message"],
+               "finished_at": document.get("finished_at"), "reply": document.get("response", {}).get("reply")}
+        if status == "failed":
+            row["error"] = document["error"]
+        preview = document.get("response", {}).get("proposal")
+        if preview:
+            # SQLite remains the proposal authority. History is read-only: no actions or apply controls.
+            with database() as db:
+                proposal_row = db.execute("SELECT status,expires FROM proposals WHERE id=?", (preview["id"],)).fetchone()
+            proposal_status = proposal_row[0] if proposal_row else "expired"
+            if proposal_status == "pending" and proposal_row[1] < time.time():
+                proposal_status = "expired"
+            row["proposal"] = {"id": preview["id"], "summary": preview["summary"], "status": proposal_status}
+        return row
+
+    @app.get(c.CHAT)
+    def chat_history(before: str | None = None, limit: int = Query(50, ge=1, le=100), sid=Depends(authenticated)):
+        if app.state.chat is None:
+            return {"turns": [], "before": None, "persistent": False}
+        rows, cursor = app.state.chat.page(before, limit)
+        return {"turns": [chat_record(row) for row in rows], "before": cursor, "persistent": True}
+
     @app.post(c.CHAT)
     def chat(body: c.ChatInput, sid=Depends(authenticated)):
-        rate_limit(("chat", sid), 12, 60)
-        with lock:
-            current = get_state()
-        result = app.state.ai.respond(body.message, [x.model_dump() for x in body.history], current, today())
+        store = app.state.chat
+        document = None
+        if store is not None:
+            document, fresh = store.reserve(body.request_id or secrets.token_urlsafe(24), body.message)
+            if not fresh:
+                status = store.status(document)
+                if status == "complete":
+                    # A duplicate may come from a new session or after a restart: never revive an old proposal.
+                    return {"reply": document["response"]["reply"], "proposal": None,
+                            "request_id": document["request_id"], "status": status}
+                if status == "failed":
+                    raise HTTPException(document.get("error_status", 503), document["error"])
+                if status == "interrupted":
+                    raise HTTPException(409, "上次訊息已保存，但回覆中斷；請重新提出要求。")
+                return JSONResponse({"request_id": document["request_id"], "status": "processing"}, status_code=202)
+        try:
+            rate_limit(("chat", sid), 12, 60)
+            with lock:
+                current = get_state()
+            # Persistence does not expand Gemini context or trust replayed client history.
+            history = store.context(document) if store else [x.model_dump() for x in body.history][-16:]
+            result = app.state.ai.respond(body.message, history, current, today())
+            response = plan_chat(body, sid, current, result)
+        except (HTTPException, AIError, GrocyError, FirestoreInventoryError, ChatStoreError) as exc:
+            code = exc.status_code if isinstance(exc, (HTTPException, FirestoreInventoryError, ChatStoreError)) else (503 if isinstance(exc, AIError) else 502)
+            detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+            if store:
+                store.finish(document, error=detail, status_code=code)
+            raise
+        except Exception:
+            if store:
+                store.finish(document, error="回覆未完成，請重新提出要求。", status_code=503)
+            raise HTTPException(503, "回覆未完成，請重新提出要求。") from None
+        if store:
+            store.finish(document, response=response)
+            response.update(request_id=document["request_id"], status="complete")
+        return response
+
+    def plan_chat(body, sid, current, result):
         actions = []
         for planned in result.actions:
             operation = planned.model_dump(mode="json", exclude_none=True)
@@ -437,6 +506,14 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
             db.execute("DELETE FROM proposals WHERE expires < ?", (time.time() - 86400,))
             db.execute("INSERT INTO proposals VALUES (?,?,?,?,?,?)", (pid, sid, fingerprint(current), json.dumps(actions, ensure_ascii=False), time.time() + 600, "pending"))
         return {"reply": "已整理操作預覽，尚未寫入。請確認下方實際物品、數量與變更。", "proposal": {"id": pid, "summary": proposal_summary(actions, current), "actions": actions}}
+
+    @app.post(c.PROPOSALS + "/{proposal_id}/dismiss")
+    def dismiss_proposal(proposal_id: str, sid=Depends(authenticated)):
+        with database() as db:
+            changed = db.execute("UPDATE proposals SET status='dismissed' WHERE id=? AND session=? AND status='pending'", (proposal_id, sid))
+            if changed.rowcount != 1:
+                raise HTTPException(409, "這份預覽已處理或不屬於本次登入，請重新整理。")
+        return {"ok": True}
 
     @app.post(c.PROPOSALS + "/{proposal_id}/apply")
     def apply_proposal(proposal_id: str, sid=Depends(authenticated)):

@@ -114,6 +114,8 @@ uv run python scripts/seed_demo.py --clear-demo --confirm-demo
 
 GitHub 用於原始碼和版本管理；GitHub Pages 的靜態服務不能單獨執行這個後端。
 
+「問問家庭管家」的文字對話另存於同一個本機 MongoDB 的 `chat_turns` collection，順序由 `chat_sequences` 的家庭序號保存，不會膨脹庫存／地圖文件。登入同一家庭即可在重整、重開或另一個瀏覽器讀取；「載入更早的對話」可逐頁回看，沒有自動刪除歷史。每次送出會先保存訊息，再產生與保存回覆；網路或資料庫錯誤會標示保存尚未確認。相同訊息編號重送不會重複呼叫 AI。中斷的回覆最多保留 120 秒處理中狀態，之後可重新提出要求，不會自動重送增加費用。AI 只讀最近 16 則已完成對話作上下文，歷史提案只供回看，必須重新提出要求才有新的確認介面。升級前只在舊頁記憶體的內容若已消失，無法回復；目前聊天只支援文字。對話備份須包含整個 MongoDB volume 或額外匯出 `chat_turns` 與 `chat_sequences`；既有庫存／地圖 JSON 匯出不包含對話。
+
 正式物品、位置、採買與家具配置保存在本機 MongoDB 的 `joyful-home_mongo-data` volume，容器重啟不會清空。登入、提案與操作紀錄仍在本機 `app-data`，模型與原始參考圖仍在 `map-data`；完整備份須一併保存這些 volumes、私人設定與完整 JSON DTO。舊 Firebase 和 Grocy 資料保留，不再接收正式寫入。目前由這台 Mac 提供 Wi-Fi 網頁，Mac／Docker 停止時手機無法連線。
 
 ## 驗證

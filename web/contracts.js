@@ -6,6 +6,7 @@ export const API = Object.freeze({
   floorplan: '/api/floorplan', floorplanImage: '/api/floorplan/image', locations: '/api/locations',
   location: id => `/api/locations/${encodeURIComponent(id)}`,
   item: id => `/api/items/${encodeURIComponent(id)}`,
+  dismissProposal: id => `/api/proposals/${encodeURIComponent(id)}/dismiss`,
   applyProposal: id => `/api/proposals/${encodeURIComponent(id)}/apply`,
 });
 export const CATEGORIES = Object.freeze({
