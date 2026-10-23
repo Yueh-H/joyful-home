@@ -17,3 +17,5 @@ export const CATEGORIES = Object.freeze({
 });
 
 export const MAP_MESSAGES = Object.freeze({ready:'joyful-map:ready',dirty:'joyful-map:dirty',focus:'joyful-map:focus',expired:'joyful-map:expired'});
+
+export const CHAT_IMAGES = Object.freeze({ count: 4, bytes: 2 * 1024 * 1024, rawBytes: 20 * 1024 * 1024, edge: 2048 });

@@ -39,10 +39,11 @@ class MongoChat:
             # Driver messages may contain a private connection string.
             raise ChatStoreError() from None
 
-    def reserve(self, request_id, message):
+    def reserve(self, request_id, message, images=None):
         document = {"_id": f"{self.home_id}:{request_id}", "home_id": self.home_id,
                     "request_id": request_id, "message": message,
-                    "created_at": timestamp(), "started": time.time(), "status": "processing"}
+                    "created_at": timestamp(), "started": time.time(), "status": "processing",
+                    "images": images or [], "image_fingerprints": [image["fingerprint"] for image in (images or [])]}
         def write():
             try:
                 # Mongo allocates order across processes; ObjectId process bytes do not preserve it.
@@ -52,8 +53,8 @@ class MongoChat:
                 self.collection.insert_one(document)
                 return document, True
             except DuplicateKeyError:
-                existing = self.collection.find_one({"_id": document["_id"]})
-                if existing is None or existing["message"] != message:
+                existing = self.collection.find_one({"_id": document["_id"]}, {"images.data": 0})
+                if existing is None or existing["message"] != message or existing.get("image_fingerprints", []) != document["image_fingerprints"]:
                     raise ChatStoreError("這個訊息編號已用於其他內容，請重新送出。", 409)
                 return existing, False
         return self._run(write)
@@ -82,7 +83,7 @@ class MongoChat:
         if before:
             query["order"] = {"$lt": int(before)}
         def read():
-            rows = list(self.collection.find(query).sort("order", -1).limit(limit + 1))
+            rows = list(self.collection.find(query, {"images.data": 0}).sort("order", -1).limit(limit + 1))
             more = len(rows) > limit
             rows = rows[:limit]
             return list(reversed(rows)), str(rows[-1]["order"]).zfill(20) if more else None
@@ -91,10 +92,35 @@ class MongoChat:
     def context(self, document):
         def read():
             rows = list(self.collection.find({"home_id": self.home_id, "status": "complete",
-                                             "order": {"$lt": document["order"]}}).sort("order", -1).limit(8))
+                                             "order": {"$lt": document["order"]}}, {"images": 0}).sort("order", -1).limit(8))
             turns = []
             for row in reversed(rows):
                 turns.extend([{"role": "user", "content": row["message"]},
                               {"role": "assistant", "content": row["response"]["reply"][:6000]}])
             return turns
         return self._run(read)
+
+    def image(self, request_id, image_id):
+        def read():
+            row = self.collection.find_one({"_id": f"{self.home_id}:{request_id}"}, {"images": 1})
+            image = next((image for image in row.get("images", []) if image["id"] == image_id), None) if row else None
+            if image is None:
+                raise ChatStoreError("找不到這張對話圖片。", 404)
+            return image
+        return self._run(read)
+
+    def model_images(self, document, current):
+        """At most four images: current first, then only the same eight completed exchanges."""
+        selected = [dict(image, source=f"本次訊息，圖片 {index + 1}") for index, image in enumerate(current)]
+        if len(selected) >= 4:
+            return selected
+        def read():
+            return list(self.collection.find({"home_id": self.home_id, "status": "complete", "order": {"$lt": document["order"]}},
+                {"images.data": 0}).sort("order", -1).limit(8))
+        for row in self._run(read):
+            for meta in row.get("images", []):
+                image = self.image(row["request_id"], meta["id"])
+                selected.append(dict(image, source=f"先前對話序號 {row['order']}，圖片 {int(meta['id']) + 1}"))
+                if len(selected) >= 4:
+                    return selected
+        return selected

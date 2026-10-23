@@ -157,14 +157,16 @@ def test_independent_write_routes_require_live_parent_session(boundary,path,meth
     assert not calls
 
 
-def test_independent_layout_uses_two_megabyte_limit_without_raising_native_api_cap(boundary):
+def test_independent_layout_uses_two_megabyte_limit_without_raising_other_native_api_caps(boundary):
     client,calls,_ = boundary
     authenticate(client)
     body = b'{"synthetic_padding":"' + b'x' * 110000 + b'"}'
     assert client.put(c.STUDIO_LAYOUT,content=body,headers={"content-type":"application/json"}).status_code == 200
     assert len(calls) == 1 and calls[0].content == body
     calls.clear()
-    assert client.post(c.CHAT,content=body,headers={"content-type":"application/json"}).status_code == 413
+    assert client.post(c.ACTIONS,content=body,headers={"content-type":"application/json"}).status_code == 413
+    # Chat alone now accepts bounded image payloads; malformed fields still fail validation.
+    assert client.post(c.CHAT,content=body,headers={"content-type":"application/json"}).status_code == 422
     assert not calls
 
 

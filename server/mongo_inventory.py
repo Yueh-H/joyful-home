@@ -101,24 +101,39 @@ class MongoInventory:
     def locations(self):
         return self._run(lambda data: sorted(data["locations"].values(), key=lambda row: row["id"]))
 
+    @staticmethod
+    def _state_from(data):
+        items = list(data["items"].values())
+        for item in items:
+            set_batches(item, batches(item))
+            item["location"] = data["locations"][str(item["location_id"])]["name"]
+            last, interval = item.get("last_maintained"), item.get("interval_days")
+            try:
+                item["next_due"] = (date.fromisoformat(last) + timedelta(days=interval)).isoformat() if last and interval else None
+            except OverflowError:
+                item["next_due"] = None
+            item.pop("batches", None)
+        shopping = list(data["shopping"].values())
+        for row in shopping:
+            product = data["items"][str(row["item_id"])]
+            row.update(name=product["name"], unit=product["unit"])
+        return {"items": sorted(items, key=lambda row: row["id"]), "shopping": sorted(shopping, key=lambda row: row["id"])}
+
     def state(self):
-        def read(data):
-            items = list(data["items"].values())
-            for item in items:
-                set_batches(item, batches(item))
-                item["location"] = data["locations"][str(item["location_id"])]["name"]
-                last, interval = item.get("last_maintained"), item.get("interval_days")
-                try:
-                    item["next_due"] = (date.fromisoformat(last) + timedelta(days=interval)).isoformat() if last and interval else None
-                except OverflowError:
-                    item["next_due"] = None
-                item.pop("batches", None)
-            shopping = list(data["shopping"].values())
-            for row in shopping:
-                product = data["items"][str(row["item_id"])]
-                row.update(name=product["name"], unit=product["unit"])
-            return {"items": sorted(items, key=lambda row: row["id"]), "shopping": sorted(shopping, key=lambda row: row["id"])}
-        return self._run(read)
+        return self._run(self._state_from)
+
+    def chat_state(self):
+        """One fresh aggregate read: inventory and every map target share the same version."""
+        from .chat_context import home_context
+        try:
+            document = self.document()
+            state = self._state_from(copy.deepcopy(document["inventory"]))
+            state["home_context"] = home_context(document)
+            return state
+        except MongoInventoryError:
+            raise
+        except (PyMongoError, ValueError, KeyError, TypeError):
+            raise MongoInventoryError() from None
 
     def create_location(self, name):
         return self._run(lambda data: self._location(data, name), write=True)

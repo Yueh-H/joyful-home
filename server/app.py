@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, Query
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import ValidationError
@@ -26,6 +26,7 @@ from .grocy import Grocy, GrocyError
 from .firestore_inventory import FirestoreInventory, FirestoreInventoryError
 from .mongo_inventory import MongoInventory
 from .chat_store import MongoChat, ChatStoreError
+from .chat_images import decode_images
 from .floorplan import register_floorplan
 from .studio_proxy import register_studio_proxy
 
@@ -123,7 +124,7 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
         if request.headers.get("content-type", "").split(";")[0] != "application/json":
             return JSONResponse({"detail": "請使用 application/json。"}, status_code=415)
         length = request.headers.get("content-length", "0")
-        body_limit = 100000
+        body_limit = c.CHAT_BODY_LIMIT if request.url.path == c.CHAT else 100000
         if request.method == "PUT":
             if request.url.path == c.FLOORPLAN:
                 body_limit = c.FLOORPLAN_BODY_LIMIT
@@ -184,8 +185,10 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
         with database() as db:
             db.execute("INSERT INTO activity VALUES (?,?,?)", (secrets.token_urlsafe(12), datetime.now(ZoneInfo("Asia/Taipei")).isoformat(timespec="seconds"), message))
 
-    def get_state():
-        state = app.state.grocy.state()
+    def get_state(include_home=False):
+        state = app.state.grocy.chat_state() if include_home and hasattr(app.state.grocy, "chat_state") else app.state.grocy.state()
+        if include_home and "home_context" not in state:
+            state["home_context"] = {"available": False, "reason": "目前庫存來源未提供家的地圖；不可推測房間或家具位置。"}
         with database() as db:
             state["activity"] = [{"id": r[0], "at": r[1], "message": r[2]} for r in db.execute("SELECT id,at,message FROM activity ORDER BY rowid DESC LIMIT 60")]
         state.update(ai={"enabled": app.state.ai.enabled, "provider": "Gemini"},
@@ -396,7 +399,9 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
         status = store.status(document)
         row = {"request_id": document["request_id"], "order": str(document["order"]).zfill(20),
                "status": status, "created_at": document["created_at"], "message": document["message"],
-               "finished_at": document.get("finished_at"), "reply": document.get("response", {}).get("reply")}
+               "finished_at": document.get("finished_at"), "reply": document.get("response", {}).get("reply"),
+               "images": [{"id": image["id"], "mime_type": image["mime_type"], "width": image["width"], "height": image["height"],
+                           "url": c.CHAT_IMAGE.format(request_id=document["request_id"], image_id=image["id"])} for image in document.get("images", [])]}
         if status == "failed":
             row["error"] = document["error"]
         preview = document.get("response", {}).get("proposal")
@@ -417,12 +422,27 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
         rows, cursor = app.state.chat.page(before, limit)
         return {"turns": [chat_record(row) for row in rows], "before": cursor, "persistent": True}
 
+    @app.get(c.CHAT_IMAGE)
+    def chat_image(request: Request, request_id: str, image_id: str, sid=Depends(authenticated)):
+        expected = str(request.base_url).rstrip("/")
+        if (request.headers.get("origin") not in (None, expected)
+                or request.headers.get("sec-fetch-site") not in (None, "same-origin", "none")):
+            raise HTTPException(403, "對話圖片只允許從家庭管家同一來源讀取。")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{16,100}", request_id) or not re.fullmatch(r"[0-3]", image_id) or app.state.chat is None:
+            raise HTTPException(404, "找不到這張對話圖片。")
+        image = app.state.chat.image(request_id, image_id)
+        return Response(content=bytes(image["data"]), media_type=image["mime_type"],
+                        headers={"Content-Disposition": "inline", "Cross-Origin-Resource-Policy": "same-origin"})
+
     @app.post(c.CHAT)
     def chat(body: c.ChatInput, sid=Depends(authenticated)):
         store = app.state.chat
         document = None
+        images = decode_images(body.images)
+        if images and store is None:
+            raise ChatStoreError("圖片對話需要本機 MongoDB 保存，請先設定家庭資料庫。")
         if store is not None:
-            document, fresh = store.reserve(body.request_id or secrets.token_urlsafe(24), body.message)
+            document, fresh = store.reserve(body.request_id or secrets.token_urlsafe(24), body.message, images)
             if not fresh:
                 status = store.status(document)
                 if status == "complete":
@@ -437,10 +457,11 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
         try:
             rate_limit(("chat", sid), 12, 60)
             with lock:
-                current = get_state()
+                current = get_state(include_home=True)
             # Persistence does not expand Gemini context or trust replayed client history.
             history = store.context(document) if store else [x.model_dump() for x in body.history][-16:]
-            result = app.state.ai.respond(body.message, history, current, today())
+            provider_images = store.model_images(document, images) if store else []
+            result = app.state.ai.respond(body.message, history, current, today(), images=provider_images) if provider_images else app.state.ai.respond(body.message, history, current, today())
             response = plan_chat(body, sid, current, result)
         except (HTTPException, AIError, GrocyError, FirestoreInventoryError, ChatStoreError) as exc:
             code = exc.status_code if isinstance(exc, (HTTPException, FirestoreInventoryError, ChatStoreError)) else (503 if isinstance(exc, AIError) else 502)

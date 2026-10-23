@@ -1,4 +1,4 @@
-import { API, CATEGORIES } from './contracts.js';
+import { API, CATEGORIES, CHAT_IMAGES } from './contracts.js';
 import { createFloorplan } from './floorplan.js';
 
 const $ = selector => document.querySelector(selector);
@@ -28,6 +28,7 @@ const AUTO_REFRESH_MS = 30_000;
 let lastStateAttempt = null, automaticRefresh = null, automaticRefreshTimer = null;
 let chatDraft = '';
 let chatComposing = false;
+let chatImages = [];
 const floorplan = createFloorplan({
   request: async (path, body, method) => body === undefined ? (await api(path)).json() : request(path, body, method),
   onExpired: () => loggedOut('登入已過期，請重新輸入家庭密碼。'),
@@ -79,6 +80,7 @@ function loggedOut(message = '', configured = true) {
   lastUpdated = null;lastStateAttempt=null;automaticRefresh=null;clearTimeout(automaticRefreshTimer);automaticRefreshTimer=null;
   chatDraft = '';
   chatComposing = false;
+  chatImages = [];
   state = null;
   messages = [];
   chatBefore = null; chatError = ''; chatPersistent = false; chatLoading = false; chatAttempt = null;
@@ -147,7 +149,7 @@ async function loadChat({ older = false } = {}) {
     chatBefore = data.before;
     const loaded = data.turns.flatMap(turn => {
       const user = { id: `${turn.request_id}:user`, request_id: turn.request_id, role: 'user', content: turn.message,
-        at: turn.created_at, order: turn.order, status: turn.status };
+        at: turn.created_at, order: turn.order, status: turn.status, images: turn.images || [] };
       const reply = turn.reply || (turn.status === 'failed' ? `這次回覆未完成：${turn.error}` :
         turn.status === 'interrupted' ? '訊息已保存，但回覆中斷。請重新提出要求。' : '訊息已保存，回覆尚未完成。稍後按「更新對話」查看；若中斷可重新提出要求。');
       return [user, { id: `${turn.request_id}:assistant`, request_id: turn.request_id, role: 'assistant', content: reply,
@@ -157,7 +159,8 @@ async function loadChat({ older = false } = {}) {
     loaded.forEach(message => merged.set(message.id, message));
     messages = [...merged.values()].sort((a, b) => (a.order || '~').localeCompare(b.order || '~') || (a.role === 'user' ? -1 : 1));
     if (proposal && loaded.some(message => message.preview?.id === proposal.id && message.preview.status !== 'pending')) proposal = null;
-    if (chatAttempt && data.turns.some(turn => turn.request_id === chatAttempt.id && ['failed', 'complete', 'interrupted'].includes(turn.status))) chatAttempt = null;
+    const completedAttempt = chatAttempt && data.turns.find(turn => turn.request_id === chatAttempt.id && ['failed', 'complete', 'interrupted'].includes(turn.status));
+    if (completedAttempt) { if (completedAttempt.status === 'complete') chatImages = []; chatAttempt = null; }
   } catch (error) {
     if (generation === sessionGeneration) chatError = error.message;
   } finally {
@@ -168,7 +171,7 @@ async function loadChat({ older = false } = {}) {
 function renderMessages() {
   const statusLabel = { pending: '舊預覽，請重新提出要求後確認', applied: '已確認並完成', applying: '執行中，請核對庫存',
     failed: '執行未全部完成，請核對庫存', expired: '預覽已過期', dismissed: '已取消' };
-  return messages.map(item => `<div class="message ${item.role === 'user' ? 'user' : 'assistant'}"><span class="message-label">${item.role === 'user' ? '你' : '家庭管家'}${item.at ? ` · ${esc(formatTime(item.at))}` : ''}${item.local ? ' · 保存尚未確認' : ''}</span>${esc(item.content)}${item.preview ? `<p class="subtitle">${esc(item.preview.summary)}<br>${esc(item.preview.status === 'pending' && proposal?.id === item.preview.id ? '等待下方確認' : statusLabel[item.preview.status] || '請核對家庭記錄')}。歷史預覽不會自動執行。</p>` : ''}</div>`).join('');
+  return messages.map(item => `<div class="message ${item.role === 'user' ? 'user' : 'assistant'}"><span class="message-label">${item.role === 'user' ? '你' : '家庭管家'}${item.at ? ` · ${esc(formatTime(item.at))}` : ''}${item.local ? ' · 保存尚未確認' : ''}</span>${esc(item.content)}${item.images?.length ? `<div class="message-images">${item.images.map((image, index) => `<a href="${esc(image.url)}" target="_blank" rel="noopener"><img src="${esc(image.url)}" alt="對話圖片 ${index + 1}" loading="lazy"></a>`).join('')}</div>` : ''}${item.preview ? `<p class="subtitle">${esc(item.preview.summary)}<br>${esc(item.preview.status === 'pending' && proposal?.id === item.preview.id ? '等待下方確認' : statusLabel[item.preview.status] || '請核對家庭記錄')}。歷史預覽不會自動執行。</p>` : ''}</div>`).join('');
 }
 
 function datePlus(date, days) {
@@ -185,6 +188,59 @@ function reminders() {
     if (item.next_due && item.next_due <= datePlus(today, 7)) result.push({ item, kind: 'maintenance', icon: 'tool', label: item.next_due < today ? '維護時間已過' : '該照顧一下了', detail: `預定維護 ${item.next_due}`, action: '完成維護' });
   }
   return result;
+}
+
+function updateChatImages() {
+  const composer = $('#chat-form');
+  if (!composer) return;
+  const preparing = chatImages.some(image => image.pending);
+  const preview = composer.querySelector('[data-chat-images]');
+  if (preview) preview.innerHTML = chatImages.map(image => `<div class="chat-image-preview">${image.pending ? '<span role="status">正在縮圖…</span>' : `<img src="data:${esc(image.mime_type)};base64,${image.data}" alt="待傳送圖片">`}<button type="button" data-chat-remove="${esc(image.localId)}" aria-label="移除圖片" ${chatBusy ? 'disabled' : ''}>×</button></div>`).join('');
+  const input = composer.querySelector('textarea');
+  input.required = !chatImages.length;
+  composer.querySelector('[type="submit"]').disabled = !state?.ai?.enabled || chatBusy || preparing;
+  composer.querySelector('[data-chat-file]').disabled = chatBusy || chatImages.length >= CHAT_IMAGES.count;
+}
+
+async function prepareChatImage(file) {
+  const bitmap = await createImageBitmap(file);
+  try {
+    if (bitmap.width * bitmap.height > 100_000_000) throw new Error('原圖像素過大，請先縮小圖片。');
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, CHAT_IMAGES.edge / Math.max(bitmap.width, bitmap.height));
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const encode = quality => new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('圖片轉換失敗。')), 'image/jpeg', quality));
+    let blob = await encode(.86);
+    if (blob.size > CHAT_IMAGES.bytes) blob = await encode(.65);
+    if (blob.size > CHAT_IMAGES.bytes) throw new Error('縮圖後仍超過 2 MiB，請選擇較小圖片。');
+    const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('無法讀取圖片。')); reader.readAsDataURL(blob); });
+    return { mime_type: blob.type, data: dataUrl.slice(dataUrl.indexOf(',') + 1) };
+  } finally { bitmap.close(); }
+}
+
+async function addChatImages(files) {
+  const generation = sessionGeneration;
+  if (chatBusy) return;
+  for (const file of files) {
+    if (generation !== sessionGeneration) return;
+    if (chatImages.length >= CHAT_IMAGES.count) { notify('每次最多附上 4 張圖片。', true); break; }
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > CHAT_IMAGES.rawBytes) { notify('僅接受 PNG、JPEG、WebP 圖片，原檔每張最多 20 MiB；不支援 PDF 或其他檔案。', true); continue; }
+    const image = { localId: crypto.randomUUID?.() || String(Date.now()) + Math.random(), pending: true };
+    chatImages.push(image); updateChatImages();
+    try {
+      const prepared = await prepareChatImage(file);
+      if (generation !== sessionGeneration) return;
+      Object.assign(image, prepared, { pending: false });
+    } catch (error) {
+      if (generation !== sessionGeneration) return;
+      chatImages = chatImages.filter(value => value !== image);
+      notify(error.message || '無法處理這張圖片，請重新選圖。', true);
+    } finally { if (generation === sessionGeneration) updateChatImages(); }
+  }
 }
 
 function fitChatInput(input = $('#chat-message')) {
@@ -229,6 +285,7 @@ function renderChatInPlace(input) {
   const updated = app.querySelector('.last-updated');
   if (lastUpdated && updated) updated.textContent = `更新 ${new Intl.DateTimeFormat('zh-TW', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Taipei', hour12: false }).format(lastUpdated)}`;
   bindPage();
+  updateChatImages();
   fitChatInput(input);
 }
 
@@ -256,6 +313,7 @@ function render() {
   app.innerHTML = `<div class="shell ${activeTab==='map'?'map-shell':''}"><aside class="sidebar"><div class="brand"><img src="/icon.svg" alt=""><div>愉悅的家庭管家<small>A LITTLE CARE, EVERY DAY</small></div></div><nav class="nav" aria-label="主要導覽">${Object.entries(tabs).map(([key, [label, glyph]]) => `<button data-tab="${key}" class="${key === activeTab ? 'active' : ''}" ${key === activeTab ? 'aria-current="page"' : ''}>${icon(glyph)}<span class="nav-full">${label}</span><span class="nav-short">${key === 'inventory' ? '物品' : key === 'map' ? '地圖' : label}</span></button>`).join('')}</nav><div class="sidebar-note"><b>把家照顧好，也照顧彼此。</b>少一點忘記，多一點餘裕。<div class="sidebar-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div></div></aside><main class="main"><header class="topbar"><div class="eyebrow">${esc(dateLabel)}</div><div class="status-wrap"><span class="connection ${connected ? '' : 'offline'}">${busy ? '更新中' : connected ? '家庭庫存已連線' : '家庭庫存未連線'}</span><button class="refresh" aria-label="重新整理家庭資料" data-refresh ${busy ? 'disabled' : ''}>↻</button></div></header><div id="state-status">${stateStatus()}</div><div id="page">${state ? renderPage() : `<div class="no-data" role="status">${busy ? '正在讀取家的筆記…' : '暫時無法讀取家的筆記。請重新連線。'}</div>`}</div><div class="mobile-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div><footer class="page-footer">一點一滴，把日子過好。</footer></main></div>`;
   bindShell();
   bindPage();
+  updateChatImages();
   if (activeTab === 'map' && state) floorplan.mount($('#floorplan-root'));
   const status = app.querySelector('.status-wrap');
   if (lastUpdated && status) {
@@ -345,7 +403,7 @@ function renderProposalActions(actions) {
 
 function renderChat() {
   const enabled = !!state.ai?.enabled;
-  return `<div class="chat-layout"><div class="title-row"><div><h1>問問家庭管家</h1><p class="subtitle">找東西、想菜單，或順手記下生活小事。</p></div></div>${!enabled ? '<div class="banner" role="status">AI 尚未設定。食材與物品記錄、採買和維護功能仍可正常使用。</div>' : ''}<section class="chat-welcome"><div class="icon-tile">${icon('chat')}</div><h2>今天有什麼需要幫忙的？</h2><p class="subtitle">自然地說就好。要修改記錄時，<br>管家會先讓你確認，再動手記下來。</p><div class="chips"><button class="chip" data-prompt="查牛奶" ${enabled ? '' : 'disabled'}>查牛奶</button><button class="chip" data-prompt="買兩瓶洗衣精" ${enabled ? '' : 'disabled'}>買兩瓶洗衣精</button><button class="chip" data-prompt="找延長線" ${enabled ? '' : 'disabled'}>找延長線</button></div></section>${chatError ? `<div class="banner" role="alert">對話保存或讀取尚未確認：${esc(chatError)}</div>` : ''}<div class="section-header"><button class="text-button" data-chat-refresh ${chatLoading || chatBusy ? 'disabled' : ''}>${chatLoading ? '正在讀取對話…' : '更新對話'}</button>${chatBefore ? `<button class="text-button" data-chat-older ${chatLoading ? 'disabled' : ''}>載入更早的對話</button>` : ''}</div><div class="messages" aria-live="polite" aria-relevant="additions">${renderMessages()}</div>${chatBusy ? '<div class="busy-text loading" role="status">管家正在翻閱家的筆記…</div>' : ''}${proposal ? `<section class="proposal" aria-label="待確認的變更"><h3>${icon('check')} 先確認，再記錄</h3><p>請核對以下實際將變更的物品與數量：</p>${renderProposalActions(proposal.actions)}<p class="proposal-summary">補充說明：${esc(proposal.summary)}</p><small>共 ${Array.isArray(proposal.actions) ? proposal.actions.length : 0} 項變更。確認後才會更新家的記錄。</small><button class="button" data-apply="${esc(proposal.id)}" ${chatBusy ? 'disabled' : ''}>確認記錄</button> <button class="button ghost" data-dismiss ${chatBusy ? 'disabled' : ''}>先不要</button></section>` : ''}<form id="chat-form" class="chat-compose"><div class="compose-box"><textarea id="chat-message" name="message" rows="1" maxlength="4000" aria-label="給家庭管家的訊息" placeholder="例如：今天買了兩瓶洗衣精…" required ${!enabled || chatBusy ? 'disabled' : ''}></textarea><button class="button" type="submit" aria-label="傳送訊息" ${!enabled || chatBusy ? 'disabled' : ''}>${icon('send')}</button></div><p class="chat-footnote">${chatPersistent ? '對話保存在本機，登入本家庭即可共用與回看。' : '正在確認對話保存狀態。'}庫存與採買以家的實際記錄為準。</p></form></div>`;
+  return `<div class="chat-layout"><div class="title-row"><div><h1>問問家庭管家</h1><p class="subtitle">找東西、想菜單，或順手記下生活小事。</p></div></div>${!enabled ? '<div class="banner" role="status">AI 尚未設定。食材與物品記錄、採買和維護功能仍可正常使用。</div>' : ''}<section class="chat-welcome"><div class="icon-tile">${icon('chat')}</div><h2>今天有什麼需要幫忙的？</h2><p class="subtitle">自然地說就好。要修改記錄時，<br>管家會先讓你確認，再動手記下來。</p><div class="chips"><button class="chip" data-prompt="查牛奶" ${enabled ? '' : 'disabled'}>查牛奶</button><button class="chip" data-prompt="買兩瓶洗衣精" ${enabled ? '' : 'disabled'}>買兩瓶洗衣精</button><button class="chip" data-prompt="找延長線" ${enabled ? '' : 'disabled'}>找延長線</button></div></section>${chatError ? `<div class="banner" role="alert">對話保存或讀取尚未確認：${esc(chatError)}</div>` : ''}<div class="section-header"><button class="text-button" data-chat-refresh ${chatLoading || chatBusy ? 'disabled' : ''}>${chatLoading ? '正在讀取對話…' : '更新對話'}</button>${chatBefore ? `<button class="text-button" data-chat-older ${chatLoading ? 'disabled' : ''}>載入更早的對話</button>` : ''}</div><div class="messages" aria-live="polite" aria-relevant="additions">${renderMessages()}</div>${chatBusy ? '<div class="busy-text loading" role="status">管家正在翻閱家的筆記…</div>' : ''}${proposal ? `<section class="proposal" aria-label="待確認的變更"><h3>${icon('check')} 先確認，再記錄</h3><p>請核對以下實際將變更的物品與數量：</p>${renderProposalActions(proposal.actions)}<p class="proposal-summary">補充說明：${esc(proposal.summary)}</p><small>共 ${Array.isArray(proposal.actions) ? proposal.actions.length : 0} 項變更。確認後才會更新家的記錄。</small><button class="button" data-apply="${esc(proposal.id)}" ${chatBusy ? 'disabled' : ''}>確認記錄</button> <button class="button ghost" data-dismiss ${chatBusy ? 'disabled' : ''}>先不要</button></section>` : ''}<form id="chat-form" class="chat-compose"><div class="chat-image-list" data-chat-images></div><div class="chat-image-tools"><button type="button" class="text-button" data-chat-file>加入圖片</button><input type="file" data-chat-files accept="image/png,image/jpeg,image/webp" multiple hidden aria-label="選擇對話圖片"><small>可貼上圖片；最多 4 張，原圖會在本機縮小後傳送給 Gemini。</small></div><div class="compose-box"><textarea id="chat-message" name="message" rows="1" maxlength="4000" aria-label="給家庭管家的訊息" placeholder="例如：今天買了兩瓶洗衣精…" required ${!enabled || chatBusy ? 'disabled' : ''}></textarea><button class="button" type="submit" aria-label="傳送訊息" ${!enabled || chatBusy ? 'disabled' : ''}>${icon('send')}</button></div><p class="chat-footnote">${chatPersistent ? '對話保存在本機，登入本家庭即可共用與回看。' : '正在確認對話保存狀態。'}庫存與採買以家的實際記錄為準。</p></form></div>`;
 }
 
 function bindShell() {
@@ -407,7 +465,20 @@ function bindPage() {
     chatInput.addEventListener('change', sync);
     // Observe native editing without intercepting paste, beforeinput, or assistive input.
     chatInput.addEventListener('beforeinput', afterNativeEdit);
-    chatInput.addEventListener('paste', afterNativeEdit);
+    chatInput.addEventListener('paste', event => {
+      const files = [...(event.clipboardData?.items || [])].filter(item => item.kind === 'file' && item.type.startsWith('image/')).map(item => item.getAsFile()).filter(Boolean);
+      if (files.length) addChatImages(files);
+      afterNativeEdit(); // Keep native text paste, including mixed text/image clipboards.
+    });
+    const composer = chatInput.closest('form');
+    composer.querySelector('[data-chat-file]').addEventListener('click', () => composer.querySelector('[data-chat-files]').click());
+    composer.querySelector('[data-chat-files]').addEventListener('change', event => { const files = [...event.target.files]; event.target.value = ''; addChatImages(files); });
+    composer.querySelector('[data-chat-images]').addEventListener('click', event => {
+      const remove = event.target.closest('[data-chat-remove]');
+      if (!remove || chatBusy) return;
+      chatImages = chatImages.filter(image => image.localId !== remove.dataset.chatRemove);
+      updateChatImages();
+    });
     chatInput.addEventListener('compositionstart', () => { chatComposing = true; });
     chatInput.addEventListener('compositionend', () => { chatComposing = false; sync(); afterNativeEdit(); });
     chatInput.addEventListener('keydown', event => {
@@ -585,9 +656,10 @@ async function sendChat(event) {
   event.preventDefault();
   const input = $('#chat-message');
   const text = input.value.trim();
-  if (!text || chatBusy || chatComposing || !state.ai?.enabled) return;
+  if ((!text && !chatImages.length) || chatImages.some(image => image.pending) || chatBusy || chatComposing || !state.ai?.enabled) return;
   const generation = sessionGeneration;
-  if (!chatAttempt || chatAttempt.text !== text) chatAttempt = { text, id: crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(24)), byte => byte.toString(16).padStart(2, '0')).join('') };
+  const imageKeys = chatImages.map(image => image.localId).join(',');
+  if (!chatAttempt || chatAttempt.text !== text || chatAttempt.images !== imageKeys) chatAttempt = { text, images: imageKeys, id: crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(24)), byte => byte.toString(16).padStart(2, '0')).join('') };
   const requestId = chatAttempt.id;
   if (!messages.some(message => message.id === `${requestId}:user`)) messages.push({ id: `${requestId}:user`, request_id: requestId, role: 'user', content: text, local: true });
   input.value = '';
@@ -596,13 +668,14 @@ async function sendChat(event) {
   chatBusy = true;
   render();
   try {
-    const response = await request(API.chat, { message: text, request_id: requestId });
+    const response = await request(API.chat, { message: text, request_id: requestId, images: chatImages.map(({ mime_type, data }) => ({ mime_type, data })) });
     if (generation !== sessionGeneration) return;
     if (response.status === 'complete') {
       messages = messages.map(message => message.id === `${requestId}:user` ? { ...message, local: false } : message);
       proposal = response.proposal || null;
       chatAttempt = null;
-    }
+      chatImages = [];
+    } else if (response.status === 'processing') { input.value = text; chatDraft = text; }
     await loadChat();
   } catch (error) {
     if (generation !== sessionGeneration) return;
@@ -610,7 +683,7 @@ async function sendChat(event) {
     await loadChat();
     if (generation !== sessionGeneration) return;
     chatError = error.message;
-    if (!messages.some(message => message.id === `${requestId}:user` && !message.local)) {
+    if (!messages.some(message => message.id === `${requestId}:assistant` && message.status === 'complete')) {
       chatDraft = text;
       const currentInput = $('#chat-message');
       if (currentInput && !currentInput.value) { currentInput.value = text; fitChatInput(currentInput); }
