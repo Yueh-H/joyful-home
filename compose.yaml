@@ -1,0 +1,40 @@
+name: joyful-home
+services:
+  grocy:
+    image: lscr.io/linuxserver/grocy:version-v4.7.1@sha256:d63bffe9afb2ef1a23fa7ce0749cdaeba9c169fb644b16eed270884a1b2f4ac9
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Asia/Taipei
+    ports:
+      - "127.0.0.1:9283:80"
+    volumes:
+      - ./data/grocy:/config
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/ > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+  app:
+    profiles: ["app"]
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      GROCY_URL: http://grocy
+      RUNTIME_DB: /app/data/app.sqlite3
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    ports:
+      - "${HOME_BIND:-127.0.0.1}:8765:8765"
+    volumes:
+      - app-data:/app/data
+    depends_on:
+      grocy:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  app-data:

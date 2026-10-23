@@ -1,0 +1,12 @@
+{
+  "id": "/",
+  "name": "愉悅的家庭管家",
+  "short_name": "家庭管家",
+  "lang": "zh-Hant",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8f7f2",
+  "theme_color": "#244b3c",
+  "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}]
+}
