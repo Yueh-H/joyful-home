@@ -1,0 +1,12 @@
+# Optional rollback configuration; the existing private credential volume is retained.
+services:
+  app:
+    environment:
+      INVENTORY_BACKEND: firestore
+      GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/firebase.json
+    volumes:
+      - firebase-credentials:/app/credentials:ro
+volumes:
+  firebase-credentials:
+    external: true
+    name: joyful-home_firebase-credentials

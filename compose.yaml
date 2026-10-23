@@ -1,6 +1,19 @@
 name: joyful-home
 services:
+  mongo:
+    image: mongo:7.0@sha256:35a5926f71f8b6cb19206bee928c5a85f241a8be99f20c81abe35ae78a73415d
+    pull_policy: if_not_present
+    volumes:
+      - mongo-data:/data/db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "quit(db.adminCommand({ping:1}).ok ? 0 : 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
   grocy:
+    profiles: ["legacy"]
     image: lscr.io/linuxserver/grocy:version-v4.7.1@sha256:d63bffe9afb2ef1a23fa7ce0749cdaeba9c169fb644b16eed270884a1b2f4ac9
     environment:
       PUID: "1000"
@@ -18,7 +31,6 @@ services:
       retries: 8
       start_period: 30s
   app:
-    profiles: ["app"]
     build: .
     env_file:
       - path: .env
@@ -27,24 +39,24 @@ services:
       GROCY_URL: http://grocy
       RUNTIME_DB: /app/data/app.sqlite3
       MAP_STUDIO_URL: http://joyful-home-map-studio-1:8780
-      INVENTORY_BACKEND: ${INVENTORY_BACKEND:-grocy}
+      INVENTORY_BACKEND: ${INVENTORY_BACKEND:-mongodb}
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017}
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-joyful_home}
+      HOME_ID: ${HOME_ID:-home}
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
       FIRESTORE_DATABASE_ID: ${FIRESTORE_DATABASE_ID:-(default)}
       FIRESTORE_HOUSEHOLD_ID: ${FIRESTORE_HOUSEHOLD_ID:-home}
-      GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/firebase.json
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     ports:
       - "${HOME_BIND:-127.0.0.1}:8765:8765"
     volumes:
       - app-data:/app/data
-      - firebase-credentials:/app/credentials:ro
     depends_on:
-      grocy:
+      mongo:
         condition: service_healthy
     restart: unless-stopped
 
 volumes:
   app-data:
-  firebase-credentials:
-    external: true
-    name: joyful-home_firebase-credentials
+  mongo-data:
+    name: joyful-home_mongo-data

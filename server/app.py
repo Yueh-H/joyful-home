@@ -24,6 +24,7 @@ from . import contracts as c
 from .ai import AIError, Gemini
 from .grocy import Grocy, GrocyError
 from .firestore_inventory import FirestoreInventory, FirestoreInventoryError
+from .mongo_inventory import MongoInventory
 from .floorplan import register_floorplan
 from .studio_proxy import register_studio_proxy
 
@@ -49,11 +50,14 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
         app.state.grocy = grocy
     elif backend == "firestore":
         app.state.grocy = FirestoreInventory()
+    elif backend in {"mongo", "mongodb"}:
+        app.state.grocy = MongoInventory()
     elif backend == "grocy":
         app.state.grocy = Grocy(os.getenv("GROCY_URL", "http://127.0.0.1:9283"), os.getenv("GROCY_API_KEY", ""))
     else:
         raise ValueError("Unsupported inventory backend")
-    firestore_mode = getattr(app.state.grocy, "backend", None) == "firestore"
+    inventory_backend = getattr(app.state.grocy, "backend", "grocy")
+    native_inventory = inventory_backend in {"firestore", "mongodb"}
     app.state.ai = ai or Gemini()
     household_password = password if password is not None else os.getenv("HOME_PASSWORD", "")
     session_secret = secret if secret is not None else os.getenv("SESSION_SECRET", "")
@@ -94,7 +98,7 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
 
     floorplan = register_floorplan(app, authenticated, database, path, lock)
     studio_delete = register_studio_proxy(app, authenticated, COOKIE, studio_url, studio_transport,
-                                         locations=app.state.grocy.locations if firestore_mode else None)
+                                         locations=app.state.grocy.locations if native_inventory else None)
 
     def rate_limit(key, limit, window):
         now = time.monotonic()
@@ -177,7 +181,7 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
         with database() as db:
             state["activity"] = [{"id": r[0], "at": r[1], "message": r[2]} for r in db.execute("SELECT id,at,message FROM activity ORDER BY rowid DESC LIMIT 60")]
         state.update(ai={"enabled": app.state.ai.enabled, "provider": "Gemini"},
-                     grocy={"connected": True}, inventory={"backend": "firestore" if firestore_mode else "grocy"}, today=today())
+                     grocy={"connected": True}, inventory={"backend": inventory_backend}, today=today())
         return state
 
     def find_item(state, pid):
@@ -338,7 +342,7 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
             body = json.loads(await request.body() or b"{}")
         except (ValueError, UnicodeDecodeError):
             raise HTTPException(422, "欄位格式不正確。") from None
-        if firestore_mode:
+        if native_inventory:
             if body == {}:
                 result = await run_in_threadpool(app.state.grocy.delete_item, int(item_id), require_empty=True)
             else:

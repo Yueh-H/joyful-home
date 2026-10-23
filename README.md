@@ -37,13 +37,13 @@
        │
        ▼
 愉悅的家庭管家（FastAPI + 原生 HTML / CSS / JavaScript）
-       ├── Firestore → 庫存、效期、位置、採買與新版地圖配置
+       ├── 本機 MongoDB → 庫存、效期、位置、採買與新版地圖配置
        └── Gemini API → 中文理解、資料查詢、操作提案
 ```
 
-正式家庭環境以 Firestore 為唯一資料來源：`INVENTORY_BACKEND=firestore`。庫存、位置、採買和新版家具配置都直接讀寫同一個 Firebase 專案，不在 Grocy 另外同步一份。舊 [Grocy](https://github.com/grocy/grocy) adapter 保留相容與搬遷用途；雲端連線失敗會回報錯誤，不回寫舊資料庫。
+正式家庭環境以本機 MongoDB 為唯一業務資料來源：`INVENTORY_BACKEND=mongodb`。庫存、位置、採買與新版地圖配置存於 `joyful_home.households` 同一份家庭文件；兩個網頁服務共用它，沒有背景 Firebase 同步。登入、提案與操作歷史仍保留在原 app-data 的本機 SQLite，模型保留在原 map-data；切換不會重設家庭密碼或 AI 金鑰。舊 Firestore／[Grocy](https://github.com/grocy/grocy) adapter 與資料保留供明確回復；本機資料缺少或讀取失敗會回報錯誤，不偷偷回到舊庫。
 
-AI 回答會取得當下庫存與日期；未知的數量、位置或效期應補問。推薦食譜不會自動扣庫存。Firebase 服務憑證與 Gemini API 金鑰只在後端，瀏覽器不能直接讀寫私人資料庫。
+AI 回答會取得當下庫存與日期；未知的數量、位置或效期應補問。推薦食譜不會自動扣庫存。資料庫只在私有 Docker network 供後端讀寫，不發布主機 DB 連接埠；Gemini API 金鑰只在後端。瀏覽器不能直接連私人資料庫。
 
 ### 用地圖找物品
 
@@ -53,32 +53,23 @@ AI 回答會取得當下庫存與日期；未知的數量、位置或效期應�
 
 新版地圖服務的原始碼保留在相鄰 `../joyful-home-map` 資料夾。先啟動本家庭服務，再於該資料夾執行 `uv run python scripts/start.py`；家庭管家透過同源路徑 `/map-studio/` 載入它，日常仍使用 8765 的同一個網址。未啟動地圖服務時，其他家庭功能仍可使用。
 
-新版家具配置存於 Firestore，不放進公開 repo，也不傳給 Gemini。原始參考底圖仍保留在本機私人 volume，由舊底圖 API 提供參考圖；正式地圖使用雲端的向量配置。舊圖釘介面已被新版替換。
+新版家具配置與庫存存於同一個本機 MongoDB 家庭文件，不放進公開 repo，也不傳給 Gemini。原始參考底圖仍保留在本機私人 volume，由舊底圖 API 提供參考圖；正式地圖使用該文件的向量配置。舊圖釘介面已被新版替換。
 
 ## 本機啟動
 
-已設定的 Firestore 家庭環境直接啟動 `docker compose --profile app up -d --build app`，再於相鄰地圖資料夾執行啟動腳本。需保留私人 `firebase-credentials` volume；不要重新執行 Grocy 初始化。新環境的設定、一次性搬遷和資料範圍見 [Firestore 設定](docs/firestore-setup.md)。
-
-以下是舊 Grocy 相容模式的首次建立流程：
-
-需要 Docker Compose 與 Python 3；應用程式本身在容器內使用 Python 3.12。
+需要 Docker Compose；已設定並完成資料匯入的本機家庭環境可直接啟動：
 
 ```bash
-git clone https://github.com/Yueh-H/joyful-home.git
-cd joyful-home
-python3 scripts/setup_grocy.py
-docker compose --profile app up -d --build
+docker compose up -d --build mongo app
 ```
 
-設定腳本初始化此專案專用的 Grocy 服務與本機設定。登入資訊保存在忽略版控的 `.local-access.txt`，請從該檔取得家庭密碼。請勿把這個檔案或 `.env` 上傳至 GitHub。
+再到相鄰地圖資料夾執行 `uv run python scripts/start.py`。MongoDB 使用專用 `joyful-home_mongo-data` volume，僅在 `joyful-home_default` network 內提供 `mongo:27017`；不會使用或修改這台電腦上其他 MongoDB。不要刪除 MongoDB、app-data 或 map-data volumes。
 
-開發時也可使用主機上的 Python 3.12+ 與 [uv](https://docs.astral.sh/uv/)：先停止 `app` 容器以釋放連接埠，保留 Grocy，再執行：
+全新環境以 `.env.example` 設定家庭密碼、至少 32 字的 session secret 及本機 MongoDB 參數；已有 `.env` 請保留內容，不重新執行 Grocy 初始化。從舊家庭搬遷必須先備份、驗證 JSON DTO 並明確匯入空的專用 MongoDB，再切換模式；完整步驟及匯出見 [本機資料搬遷](docs/local-storage.md)。匯入會保留物品、位置、家具與分格 ID；不依舊雲端故障自動建立空家庭。
 
-```bash
-docker compose stop app
-uv sync --extra dev
-uv run uvicorn server.app:app --host 0.0.0.0 --port 8765
-```
+Firestore 仍可作明確回復模式：加入 `-f compose.yaml -f compose.firestore.yaml`，沿用原私有憑證 volume，設定過程見舊 [Firestore 設定](docs/firestore-setup.md)。Grocy 相容模式透過 `--profile legacy` 與 `INVENTORY_BACKEND=grocy` 明確啟動；一般本機模式不需要它或 Firebase 憑證。切換模式不會刪掉舊資料，亦不會將本機變更自動回寫雲端。
+
+開發時可用 [uv](https://docs.astral.sh/uv/) 執行 Python；主機上的 MongoDB URI 必須指向自己為此專案提供的開發連線，不能直接假設 `localhost:27017` 就是這個家庭資料庫。容器中的 `mongodb://mongo:27017` 不等於主機位址。
 
 在電腦開啟 `http://localhost:8765`。手機與電腦在同一個 Wi-Fi 時，使用電腦的區網 IP，例如 `http://192.168.1.100:8765`。伺服器和 Docker 必須保持執行；localhost 只代表開啟網頁的那部裝置。
 
@@ -90,7 +81,7 @@ uv run uvicorn server.app:app --host 0.0.0.0 --port 8765
 
 ### 示範資料
 
-正式使用從空資料開始。測試時可明確加入可辨識的示範物品：
+以下示範腳本是舊 Grocy 測試工具，只在明確的隔離 Grocy 模式使用，不拿來初始化或清空正式 MongoDB 家庭。測試時可加入可辨識的示範物品：
 
 ```bash
 uv sync --extra dev
@@ -109,7 +100,7 @@ uv run python scripts/seed_demo.py --clear-demo --confirm-demo
 
 ## 手機與家庭共用
 
-- 兩部手機登入同一個家庭服務，即讀取同一份 Firestore 家庭資料。
+- 兩部手機登入同一個家庭服務，即讀取同一份本機 MongoDB 家庭資料。
 - 網頁會重新載入最新資料；需要網路連線，不能離線修改庫存。
 - 安裝到主畫面與 service worker 需要 HTTPS（或本機 localhost）；一般區網 HTTP 仍能瀏覽使用。
 - 要在外面或全天使用，請將服務放在常開主機 / NAS，設定 HTTPS 與家庭登入；也可以經由自己的私人網路連回家。
@@ -123,7 +114,7 @@ uv run python scripts/seed_demo.py --clear-demo --confirm-demo
 
 GitHub 用於原始碼和版本管理；GitHub Pages 的靜態服務不能單獨執行這個後端。
 
-正式物品、位置、採買與家具配置保存在 Firestore，容器重啟不會清空。登入、提案與操作紀錄仍在本機 `app-data` volume，原始參考底圖也在本機；完整備份須另保存這些資料與私人設定／憑證。舊 Grocy 和 SQLite volumes 保留作搬遷前備份，不再接收正式寫入。資料庫上雲不等於網頁已部署，現在仍由這台 Mac 提供 Wi-Fi 網頁。
+正式物品、位置、採買與家具配置保存在本機 MongoDB 的 `joyful-home_mongo-data` volume，容器重啟不會清空。登入、提案與操作紀錄仍在本機 `app-data`，模型與原始參考圖仍在 `map-data`；完整備份須一併保存這些 volumes、私人設定與完整 JSON DTO。舊 Firebase 和 Grocy 資料保留，不再接收正式寫入。目前由這台 Mac 提供 Wi-Fi 網頁，Mac／Docker 停止時手機無法連線。
 
 ## 驗證
 
