@@ -79,3 +79,33 @@ all exit 0
 
 - [手機 390px](screenshots/mobile.png)
 - [桌面 1280px](screenshots/desktop.png)
+
+## 空家庭補驗（2026-10-23 13:15–13:16；最新結論）
+
+交付清空示範資料後，主 agent 的檢查指令誤用 `/api/shopping_list`，該非清單路徑回 200、JSON null，對 `None` 取 len 導致 TypeError。後續確認正確的 `/api/objects/products` 與 `/api/objects/shopping_list` 均回 200、`[]`。這是檢查指令的路徑錯誤，不能宣稱已重現應用程式的空家庭缺陷；指令已更正。同時新增 `read_list()` 防禦性補強：空 body 正規化為 `[]`，非 list 異常仍報錯；204 分支由新增 mock 測試覆蓋。
+
+補強並重新 build Docker 後，獨立驗證者另以 ego-browser TaskSpace 144、390px 區網 HTTP 完成以下最小流程；沒有重跑整套功能，也沒有重新放回示範資料：
+
+1. 已登入的 `GET /api/state` 回 200，`items=[]`、`shopping=[]`、`grocy.connected=true`。
+2. 清除該測試登入 session 後，用家庭密碼從手機登入表單重新登入；首頁顯示「我們的家，從一筆開始」，庫存頁顯示「家的物品，從這裡開始記」。
+3. 用表單新增 `驗證｜空家庭204`，取得產品 ID 12，初始數量 0；Grocy state 能正常列出零庫存產品。
+4. 編輯該品項，點「移除物品」，接受含完整測試品名的原生第二次確認。移除成功後 `GET /api/state` 仍為 200，items 與 shopping 都回到空陣列，手機庫存頁回到正常空態。
+5. TaskSpace 144 已 `finish({keep:[]})`。只移除本輪建立的 ID 12，未觸碰其他未知品項。
+
+本輪實際查詢的 Grocy `objects/products`、`objects/stock`、`objects/shopping_list` 與已移除測試品項 entries 均回 **200，body 為 `[]`（2 bytes）**；沒有在本輪獨立觀察到 204。`Grocy.objects('products')` 與 setup `api('objects/products', env)` 皆得到 `[]`。204/空 body 的防護證據來自新增的明示 mock 案例；不把 200 空集合的實跑描述成真實 204。
+
+```text
+uv run pytest -q
+27 passed, 1 warning in 0.98s
+
+git diff --check
+exit 0
+```
+
+最新驗證結論：**27 項測試通過，空家庭 API／手機新增零庫存／確認移除流程通過，無剩餘阻塞 finding**。原 24 項輸出保留作歷史紀錄。新增與移除產生的兩筆活動紀錄 marker 為 `驗證｜空家庭204`；主 agent 已依此 marker 清除兩筆，read-back 為 0 產品、0 採買、0 活動。本驗證者沒有直接修改 runtime DB。
+
+## GitHub CI
+
+首跑 [39904738728](https://github.com/Yueh-H/joyful-home/actions/runs/39904738728) 在準備 action 時失敗：`Unable to resolve action astral-sh/setup-uv@v10`。這是未存在的 major alias；尚未執行應用測試。已查證上游版本 ref，將 checkout 與 setup-uv 固定至對應 commit SHA。
+
+修正後 [39904818152](https://github.com/Yueh-H/joyful-home/actions/runs/39904818152) 成功，包含 27 項測試、JavaScript 語法與 Compose 配置。此紀錄由主 agent 讀取 GitHub run 結果確認。
