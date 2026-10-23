@@ -148,7 +148,8 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
         response.headers["Referrer-Policy"] = "same-origin"
         ancestors = "'self'" if embedded else "'none'"
         images = "'self' data: blob:" if embedded else "'self' data:"
-        response.headers["Content-Security-Policy"] = f"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src {images}; connect-src 'self'; frame-src 'self'; frame-ancestors {ancestors}; base-uri 'self'; form-action 'self'"
+        connections = "'self' blob:" if embedded else "'self'"
+        response.headers["Content-Security-Policy"] = f"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src {images}; connect-src {connections}; frame-src 'self'; frame-ancestors {ancestors}; base-uri 'self'; form-action 'self'"
         return response
 
     @app.exception_handler(RequestValidationError)

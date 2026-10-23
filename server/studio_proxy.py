@@ -24,6 +24,10 @@ def register_studio_proxy(app, authenticated, cookie_name, studio_url=None, tran
         "contracts.js": ("/contracts.js", "application/javascript", {"application/javascript", "text/javascript"}),
         "styles.css": ("/styles.css", "text/css", {"text/css"}),
     }
+    for name in ("model-viewer.js", "vendor/three.module.js", "vendor/three.core.js",
+                 "vendor/OrbitControls.js", "vendor/GLTFLoader.js", "vendor/BufferGeometryUtils.js", "vendor/SkeletonUtils.js", "vendor/RoomEnvironment.js"):
+        assets[name] = (f"/{name}", "application/javascript", {"application/javascript", "text/javascript"})
+    assets["vendor/THREE-LICENSE.txt"] = ("/vendor/THREE-LICENSE.txt", "text/plain", {"text/plain"})
 
     async def forward(request, path, media_type="application/json", safe_types=None):
         token = request.cookies.get(cookie_name, "")
@@ -74,8 +78,15 @@ def register_studio_proxy(app, authenticated, cookie_name, studio_url=None, tran
         return await forward(request, request.url.path)
 
     for path, method in ((c.STUDIO_LAYOUT, "GET"), (c.STUDIO_LAYOUT, "PUT"),
-                         (c.STUDIO_REFERENCE, "GET"), (c.STUDIO_EXPORT, "GET"), (c.LOCATIONS, "GET")):
+                         (c.STUDIO_REFERENCE, "GET"), (c.STUDIO_EXPORT, "GET"), (c.STUDIO_MODELS, "GET"), (c.LOCATIONS, "GET")):
         app.add_api_route(path, api, methods=[method])
+
+    @app.get(c.STUDIO_MODEL, dependencies=[Depends(authenticated)])
+    async def model_asset(object_id: str, request: Request):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", object_id):
+            raise HTTPException(404, "找不到這件家具的模型。")
+        return await forward(request, c.STUDIO_MODEL.format(object_id=object_id),
+                             "model/gltf-binary", {"model/gltf-binary"})
 
     @app.post(c.STUDIO_CLEAR, dependencies=[Depends(authenticated)])
     async def clear_object(object_id: str, request: Request):
