@@ -27,6 +27,7 @@ let lastUpdated = null;
 const AUTO_REFRESH_MS = 30_000;
 let lastStateAttempt = null, automaticRefresh = null, automaticRefreshTimer = null;
 let chatDraft = '';
+let chatComposing = false;
 const floorplan = createFloorplan({
   request: async (path, body, method) => body === undefined ? (await api(path)).json() : request(path, body, method),
   onExpired: () => loggedOut('登入已過期，請重新輸入家庭密碼。'),
@@ -77,6 +78,7 @@ function loggedOut(message = '', configured = true) {
   authenticated = false;
   lastUpdated = null;lastStateAttempt=null;automaticRefresh=null;clearTimeout(automaticRefreshTimer);automaticRefreshTimer=null;
   chatDraft = '';
+  chatComposing = false;
   state = null;
   messages = [];
   chatBefore = null; chatError = ''; chatPersistent = false; chatLoading = false; chatAttempt = null;
@@ -185,6 +187,55 @@ function reminders() {
   return result;
 }
 
+function fitChatInput(input = $('#chat-message')) {
+  if (!input) return;
+  const style = getComputedStyle(input);
+  const minimum = parseFloat(style.minHeight) || 48;
+  const viewport = window.visualViewport?.height || window.innerHeight;
+  const maximum = Math.max(minimum, Math.min(parseFloat(style.maxHeight) || 224, viewport * .35));
+  input.style.height = 'auto';
+  input.style.height = `${Math.max(minimum, Math.min(input.scrollHeight, maximum))}px`;
+  input.style.overflowY = input.scrollHeight > input.clientHeight + 1 ? 'auto' : 'hidden';
+}
+
+function syncChatInput(input) {
+  chatDraft = input.value;
+  fitChatInput(input);
+}
+
+function renderChatInPlace(input) {
+  // Keep the native editing target connected: moving/replacing it ends IME or dictation sessions.
+  const composer = input.closest('form');
+  const layout = composer.parentElement;
+  const next = document.createElement('div');
+  next.innerHTML = renderChat();
+  const nextComposer = next.querySelector('#chat-form');
+  for (const child of [...layout.children]) if (child !== composer) child.remove();
+  for (const child of [...next.firstElementChild.children]) if (child !== nextComposer) composer.before(child);
+  input.disabled = nextComposer.querySelector('textarea').disabled;
+  composer.querySelector('[type="submit"]').disabled = nextComposer.querySelector('[type="submit"]').disabled;
+  composer.querySelector('.chat-footnote').textContent = nextComposer.querySelector('.chat-footnote').textContent;
+  const connection = app.querySelector('.connection');
+  if (connection) {
+    connection.textContent = busy ? '更新中' : stateError ? '家庭庫存未連線' : '家庭庫存已連線';
+    connection.classList.toggle('offline', !!stateError);
+  }
+  app.querySelectorAll('[data-refresh]').forEach(button => { button.disabled = busy; });
+  const status = $('#state-status');
+  if (status) {
+    status.innerHTML = stateStatus();
+    status.querySelector('[data-refresh]')?.addEventListener('click', () => { if (!busy) loadState(); });
+  }
+  const updated = app.querySelector('.last-updated');
+  if (lastUpdated && updated) updated.textContent = `更新 ${new Intl.DateTimeFormat('zh-TW', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Taipei', hour12: false }).format(lastUpdated)}`;
+  bindPage();
+  fitChatInput(input);
+}
+
+function stateStatus() {
+  return stateError ? `<div class="banner" role="alert">${esc(stateError)} ${state ? '下方是上次讀取的資料。' : ''}<button data-refresh class="text-button">重新連線</button></div>` : '';
+}
+
 function render() {
   // Keep the live iframe attached during background inventory/status refreshes.
   if (activeTab === 'map' && state && $('#floorplan-root')) {
@@ -197,11 +248,12 @@ function render() {
   const restoreChatFocus = draftInput && document.activeElement === draftInput;
   const selection = draftInput ? [draftInput.selectionStart, draftInput.selectionEnd] : null;
   if (draftInput) chatDraft = draftInput.value;
+  if (activeTab === 'chat' && state && draftInput) { renderChatInPlace(draftInput); return; }
   const connected = !!state?.grocy?.connected && !stateError;
   const today = state?.today;
   const dateLabel = today ? new Intl.DateTimeFormat('zh-TW', { month: 'long', day: 'numeric', weekday: 'long', timeZone: 'Asia/Taipei' }).format(new Date(`${today}T12:00:00+08:00`)) : '我們的家的筆記';
   floorplan.unmount();
-  app.innerHTML = `<div class="shell ${activeTab==='map'?'map-shell':''}"><aside class="sidebar"><div class="brand"><img src="/icon.svg" alt=""><div>愉悅的家庭管家<small>A LITTLE CARE, EVERY DAY</small></div></div><nav class="nav" aria-label="主要導覽">${Object.entries(tabs).map(([key, [label, glyph]]) => `<button data-tab="${key}" class="${key === activeTab ? 'active' : ''}" ${key === activeTab ? 'aria-current="page"' : ''}>${icon(glyph)}<span class="nav-full">${label}</span><span class="nav-short">${key === 'inventory' ? '物品' : key === 'map' ? '地圖' : label}</span></button>`).join('')}</nav><div class="sidebar-note"><b>把家照顧好，也照顧彼此。</b>少一點忘記，多一點餘裕。<div class="sidebar-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div></div></aside><main class="main"><header class="topbar"><div class="eyebrow">${esc(dateLabel)}</div><div class="status-wrap"><span class="connection ${connected ? '' : 'offline'}">${busy ? '更新中' : connected ? '家庭庫存已連線' : '家庭庫存未連線'}</span><button class="refresh" aria-label="重新整理家庭資料" data-refresh ${busy ? 'disabled' : ''}>↻</button></div></header>${stateError ? `<div class="banner" role="alert">${esc(stateError)} ${state ? '下方是上次讀取的資料。' : ''}<button data-refresh class="text-button">重新連線</button></div>` : ''}<div id="page">${state ? renderPage() : `<div class="no-data" role="status">${busy ? '正在讀取家的筆記…' : '暫時無法讀取家的筆記。請重新連線。'}</div>`}</div><div class="mobile-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div><footer class="page-footer">一點一滴，把日子過好。</footer></main></div>`;
+  app.innerHTML = `<div class="shell ${activeTab==='map'?'map-shell':''}"><aside class="sidebar"><div class="brand"><img src="/icon.svg" alt=""><div>愉悅的家庭管家<small>A LITTLE CARE, EVERY DAY</small></div></div><nav class="nav" aria-label="主要導覽">${Object.entries(tabs).map(([key, [label, glyph]]) => `<button data-tab="${key}" class="${key === activeTab ? 'active' : ''}" ${key === activeTab ? 'aria-current="page"' : ''}>${icon(glyph)}<span class="nav-full">${label}</span><span class="nav-short">${key === 'inventory' ? '物品' : key === 'map' ? '地圖' : label}</span></button>`).join('')}</nav><div class="sidebar-note"><b>把家照顧好，也照顧彼此。</b>少一點忘記，多一點餘裕。<div class="sidebar-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div></div></aside><main class="main"><header class="topbar"><div class="eyebrow">${esc(dateLabel)}</div><div class="status-wrap"><span class="connection ${connected ? '' : 'offline'}">${busy ? '更新中' : connected ? '家庭庫存已連線' : '家庭庫存未連線'}</span><button class="refresh" aria-label="重新整理家庭資料" data-refresh ${busy ? 'disabled' : ''}>↻</button></div></header><div id="state-status">${stateStatus()}</div><div id="page">${state ? renderPage() : `<div class="no-data" role="status">${busy ? '正在讀取家的筆記…' : '暫時無法讀取家的筆記。請重新連線。'}</div>`}</div><div class="mobile-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div><footer class="page-footer">一點一滴，把日子過好。</footer></main></div>`;
   bindShell();
   bindPage();
   if (activeTab === 'map' && state) floorplan.mount($('#floorplan-root'));
@@ -216,6 +268,7 @@ function render() {
   const currentInput = $('#chat-message');
   if (currentInput) {
     currentInput.value = chatDraft;
+    fitChatInput(currentInput);
     if (restoreChatFocus && !currentInput.disabled) { currentInput.focus({ preventScroll: true }); currentInput.setSelectionRange(...selection); }
   }
 }
@@ -339,14 +392,30 @@ function bindPage() {
     if (shopping) actionDialog('shopping_complete', shopping.item_id, shopping);
   }));
   app.querySelectorAll('[data-prompt]').forEach(button => button.addEventListener('click', () => {
-    const input = $('#chat-message'); input.value = button.dataset.prompt; input.focus();
+    const input = $('#chat-message'); input.value = button.dataset.prompt; syncChatInput(input); input.focus();
   }));
   app.querySelector('[data-chat-refresh]')?.addEventListener('click', () => loadChat());
   app.querySelector('[data-chat-older]')?.addEventListener('click', () => loadChat({ older: true }));
-  $('#chat-form')?.addEventListener('submit', sendChat);
-  $('#chat-message')?.addEventListener('keydown', event => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('#chat-form').requestSubmit(); }
-  });
+  const chatInput = $('#chat-message');
+  if (chatInput && !chatInput.dataset.bound) {
+    chatInput.dataset.bound = 'true';
+    chatComposing = false;
+    $('#chat-form').addEventListener('submit', sendChat);
+    const sync = () => syncChatInput(chatInput);
+    const afterNativeEdit = () => requestAnimationFrame(() => { if (chatInput.isConnected) sync(); });
+    chatInput.addEventListener('input', sync);
+    chatInput.addEventListener('change', sync);
+    // Observe native editing without intercepting paste, beforeinput, or assistive input.
+    chatInput.addEventListener('beforeinput', afterNativeEdit);
+    chatInput.addEventListener('paste', afterNativeEdit);
+    chatInput.addEventListener('compositionstart', () => { chatComposing = true; });
+    chatInput.addEventListener('compositionend', () => { chatComposing = false; sync(); afterNativeEdit(); });
+    chatInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !chatComposing && event.keyCode !== 229) {
+        event.preventDefault(); $('#chat-form').requestSubmit();
+      }
+    });
+  }
   app.querySelector('[data-dismiss]')?.addEventListener('click', async () => {
     try { await request(API.dismissProposal(proposal.id), {}); proposal = null; await loadChat(); }
     catch (error) { notify(error.message, true); }
@@ -516,7 +585,7 @@ async function sendChat(event) {
   event.preventDefault();
   const input = $('#chat-message');
   const text = input.value.trim();
-  if (!text || chatBusy || !state.ai?.enabled) return;
+  if (!text || chatBusy || chatComposing || !state.ai?.enabled) return;
   const generation = sessionGeneration;
   if (!chatAttempt || chatAttempt.text !== text) chatAttempt = { text, id: crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(24)), byte => byte.toString(16).padStart(2, '0')).join('') };
   const requestId = chatAttempt.id;
@@ -541,7 +610,11 @@ async function sendChat(event) {
     await loadChat();
     if (generation !== sessionGeneration) return;
     chatError = error.message;
-    if (!messages.some(message => message.id === `${requestId}:user` && !message.local)) chatDraft = text;
+    if (!messages.some(message => message.id === `${requestId}:user` && !message.local)) {
+      chatDraft = text;
+      const currentInput = $('#chat-message');
+      if (currentInput && !currentInput.value) { currentInput.value = text; fitChatInput(currentInput); }
+    }
   } finally {
     if (generation === sessionGeneration) {
       chatBusy = false;
@@ -594,6 +667,8 @@ function refreshWhenReturning(debounce = true) {
   const request=loadState({background:true}).finally(()=>{if(automaticRefresh===request)automaticRefresh=null;});
   automaticRefresh=request;return request;
 }
+window.addEventListener('resize', () => fitChatInput());
+window.visualViewport?.addEventListener('resize', () => fitChatInput());
 document.addEventListener('visibilitychange', refreshWhenReturning);
 window.addEventListener('focus', refreshWhenReturning);
 window.addEventListener('hashchange', () => { if(!authenticated)return;const nextTab=tabs[location.hash.slice(1)]?location.hash.slice(1):'today';if(activeTab==='map'&&nextTab!=='map'&&!floorplan.canLeave()){history.replaceState(null,'','#map');return;}if(nextTab!==activeTab){activeTab=nextTab;render();if(activeTab==='chat')loadChat();} });
