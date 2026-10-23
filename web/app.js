@@ -23,6 +23,8 @@ let toastTimer;
 let returnFocus = null;
 let authenticated = false;
 let lastUpdated = null;
+const AUTO_REFRESH_MS = 30_000;
+let lastStateAttempt = null, automaticRefresh = null, automaticRefreshTimer = null;
 let chatDraft = '';
 const floorplan = createFloorplan({
   request: async (path, body, method) => body === undefined ? (await api(path)).json() : request(path, body, method),
@@ -72,7 +74,7 @@ function loggedOut(message = '', configured = true) {
   sessionGeneration++;
   floorplan.reset();
   authenticated = false;
-  lastUpdated = null;
+  lastUpdated = null;lastStateAttempt=null;automaticRefresh=null;clearTimeout(automaticRefreshTimer);automaticRefreshTimer=null;
   chatDraft = '';
   state = null;
   messages = [];
@@ -109,6 +111,7 @@ function renderLogin(message = '', configured = true) {
 
 async function loadState({ background = false } = {}) {
   const generation = sessionGeneration;
+  lastStateAttempt=Date.now();
   busy = true;
   if (!background && (state || !$('#login-form'))) render();
   try {
@@ -123,7 +126,7 @@ async function loadState({ background = false } = {}) {
     if (generation !== sessionGeneration) return;
     stateError = error.message || '無法連線，請確認網路後再試。';
   } finally {
-    if (generation === sessionGeneration) { busy = false; render(); }
+    if (generation === sessionGeneration) { lastStateAttempt=Date.now();busy = false; render(); }
   }
 }
 
@@ -526,8 +529,16 @@ async function start() {
   }
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { /* The app still works without installation. */ });
 }
-function refreshWhenReturning() {
-  if (document.visibilityState === 'visible' && authenticated && !busy && !chatBusy && !dialog.open) loadState({ background: true });
+// Returning/focus events may come in bursts; manual and post-write loadState calls
+// deliberately bypass this gate, including after a failed automatic read.
+function refreshWhenReturning(debounce = true) {
+  clearTimeout(automaticRefreshTimer);automaticRefreshTimer=null;
+  if (document.visibilityState !== 'visible' || !authenticated || busy || chatBusy || dialog.open) return;
+  if (automaticRefresh) return automaticRefresh;
+  if ([lastUpdated?.getTime(),lastStateAttempt].some(at=>at!=null&&Date.now()-at<AUTO_REFRESH_MS)) return;
+  if (debounce) { automaticRefreshTimer=setTimeout(()=>refreshWhenReturning(false),180);return; }
+  const request=loadState({background:true}).finally(()=>{if(automaticRefresh===request)automaticRefresh=null;});
+  automaticRefresh=request;return request;
 }
 document.addEventListener('visibilitychange', refreshWhenReturning);
 window.addEventListener('focus', refreshWhenReturning);
