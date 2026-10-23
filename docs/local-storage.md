@@ -18,7 +18,7 @@ python scripts/mongo_household.py import --approved-home \
   --snapshot /private/after.json --layout-schema /private/map-server.py
 ```
 
-`--approved-home` 強制此批搬遷基準：revision 37、97 個位置、35 件家具、76 格、0 品項、0 採買。匯入完整保留 ID；下一個位置編號為 98。只在目的資料庫空白時做一次完整 insert；匯入 SHA 和內容都相同時可重跑驗證，目的資料不同或匯入後已修改會拒絕覆寫。匯入前須備份原設定、runtime、模型與私人快照。CLI 不會變更原帳密、Gemini 金鑰、雲端資料或模型。
+`--approved-home` 強制此批搬遷基準：revision 37、97 個位置、35 件家具、76 格、0 品項、0 採買。匯入完整保留 ID；新增位置依已保存的 next-ID counter 配置編號。只在目的資料庫空白時做一次完整 insert；匯入 SHA 和內容都相同時可重跑驗證，目的資料不同或匯入後已修改會拒絕覆寫。匯入前須備份原設定、runtime、模型與私人快照。CLI 不會變更原帳密、Gemini 金鑰、雲端資料或模型。
 
 ## 完整 JSON DTO 匯出
 
