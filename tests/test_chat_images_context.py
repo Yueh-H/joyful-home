@@ -198,9 +198,15 @@ def test_fresh_complete_map_context_from_one_household_read(photo_rig):
     assert context['furniture'][1]['room_id'] is None
     assert context['locations'][0]['item_ids'] == [item]
     assert context['locations'][1]['item_ids'] == []
+    assert context['coverage']['complete'] is True
+    assert context['coverage']['counts'] == {'rooms': 2, 'furniture': 2, 'slots': 1, 'locations': 2, 'items': 1}
+    assert 'synthetic item' in context['hierarchy_markdown']
+    assert '未分類房間' in context['hierarchy_markdown']
     adapter.collection.update_one({'_id': store.home_id}, {'$set': {'layout.rooms.1.name': 'fresh empty room'}, '$inc': {'version': 1}})
     assert send(http, message='fresh positions').status_code == 200
     assert ai.calls[-1]['state']['home_context']['rooms'][1]['name'] == 'fresh empty room'
+    assert 'fresh empty room' in ai.calls[-1]['state']['home_context']['hierarchy_markdown']
+    assert 'fresh empty room' not in context['hierarchy_markdown']
     assert len(reads) == 2
 
 

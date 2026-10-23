@@ -102,11 +102,16 @@ class MongoInventory:
         return self._run(lambda data: sorted(data["locations"].values(), key=lambda row: row["id"]))
 
     @staticmethod
-    def _state_from(data):
+    def _state_from(data, allow_unknown_locations=False):
         items = list(data["items"].values())
         for item in items:
             set_batches(item, batches(item))
-            item["location"] = data["locations"][str(item["location_id"])]["name"]
+            if allow_unknown_locations:
+                location = next((row for row in data["locations"].values()
+                                 if type(row["id"]) is type(item.get("location_id")) and row["id"] == item.get("location_id")), None)
+                item["location"] = location["name"] if location else "未知／未分類位置"
+            else:
+                item["location"] = data["locations"][str(item["location_id"])]["name"]
             last, interval = item.get("last_maintained"), item.get("interval_days")
             try:
                 item["next_due"] = (date.fromisoformat(last) + timedelta(days=interval)).isoformat() if last and interval else None
@@ -127,7 +132,7 @@ class MongoInventory:
         from .chat_context import home_context
         try:
             document = self.document()
-            state = self._state_from(copy.deepcopy(document["inventory"]))
+            state = self._state_from(copy.deepcopy(document["inventory"]), allow_unknown_locations=True)
             state["home_context"] = home_context(document)
             return state
         except MongoInventoryError:
