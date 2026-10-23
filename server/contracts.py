@@ -17,6 +17,12 @@ FLOORPLAN = f"{API}/floorplan"
 FLOORPLAN_IMAGE = f"{FLOORPLAN}/image"
 LOCATIONS = f"{API}/locations"
 FLOORPLAN_BODY_LIMIT = 16 * 1024 * 1024
+MAP_STUDIO = "/map-studio/"
+STUDIO_LAYOUT = f"{API}/studio/layout"
+STUDIO_REFERENCE = f"{API}/studio/reference"
+STUDIO_EXPORT = f"{API}/studio/export"
+STUDIO_CLEAR = f"{API}/studio/objects/{{object_id}}/clear"
+STUDIO_BODY_LIMIT = 2 * 1024 * 1024
 CATEGORIES = {"food": "食材", "supplies": "家用消耗品", "maintenance": "維護用品", "tools": "工具"}
 USERFIELDS = {"category": "分類", "model": "型號", "interval_days": "維護間隔天數", "last_maintained": "上次維護"}
 Nonnegative = Annotated[float, Field(ge=0, le=1e9, allow_inf_nan=False)]

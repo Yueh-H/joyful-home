@@ -26,6 +26,7 @@ services:
     environment:
       GROCY_URL: http://grocy
       RUNTIME_DB: /app/data/app.sqlite3
+      MAP_STUDIO_URL: http://joyful-home-map-studio-1:8780
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     ports:
       - "${HOME_BIND:-127.0.0.1}:8765:8765"

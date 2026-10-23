@@ -26,6 +26,7 @@ let lastUpdated = null;
 let chatDraft = '';
 const floorplan = createFloorplan({
   request: async (path, body, method) => body === undefined ? (await api(path)).json() : request(path, body, method),
+  onExpired: () => loggedOut('登入已過期，請重新輸入家庭密碼。'),
   getItems: () => state?.items || [], notify, editItem, onItemsChanged: () => loadState({ background: true }),
 });
 
@@ -79,6 +80,7 @@ function loggedOut(message = '', configured = true) {
   chatBusy = false;
   busy = false;
   stateError = '';
+  clearTimeout(toastTimer);$('#toast').hidden=true;$('#toast').textContent='';
   if (dialog.open) dialog.close();
   dialog.replaceChildren();
   renderLogin(message, configured);
@@ -142,6 +144,13 @@ function reminders() {
 }
 
 function render() {
+  // Keep the live iframe attached during background inventory/status refreshes.
+  if (activeTab === 'map' && state && $('#floorplan-root')) {
+    const connection = app.querySelector('.connection');
+    if (connection) { connection.textContent = busy ? '更新中' : stateError ? '家庭庫存未連線' : '家庭庫存已連線'; connection.classList.toggle('offline', !!stateError); }
+    app.querySelectorAll('[data-refresh]').forEach(button => { button.disabled = busy; });
+    return;
+  }
   const draftInput = $('#chat-message');
   const restoreChatFocus = draftInput && document.activeElement === draftInput;
   const selection = draftInput ? [draftInput.selectionStart, draftInput.selectionEnd] : null;
@@ -150,7 +159,7 @@ function render() {
   const today = state?.today;
   const dateLabel = today ? new Intl.DateTimeFormat('zh-TW', { month: 'long', day: 'numeric', weekday: 'long', timeZone: 'Asia/Taipei' }).format(new Date(`${today}T12:00:00+08:00`)) : '我們的家的筆記';
   floorplan.unmount();
-  app.innerHTML = `<div class="shell"><aside class="sidebar"><div class="brand"><img src="/icon.svg" alt=""><div>愉悅的家庭管家<small>A LITTLE CARE, EVERY DAY</small></div></div><nav class="nav" aria-label="主要導覽">${Object.entries(tabs).map(([key, [label, glyph]]) => `<button data-tab="${key}" class="${key === activeTab ? 'active' : ''}" ${key === activeTab ? 'aria-current="page"' : ''}>${icon(glyph)}<span class="nav-full">${label}</span><span class="nav-short">${key === 'inventory' ? '物品' : key === 'map' ? '地圖' : label}</span></button>`).join('')}</nav><div class="sidebar-note"><b>把家照顧好，也照顧彼此。</b>少一點忘記，多一點餘裕。<div class="sidebar-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div></div></aside><main class="main"><header class="topbar"><div class="eyebrow">${esc(dateLabel)}</div><div class="status-wrap"><span class="connection ${connected ? '' : 'offline'}">${busy ? '更新中' : connected ? '家庭庫存已連線' : '家庭庫存未連線'}</span><button class="refresh" aria-label="重新整理家庭資料" data-refresh ${busy ? 'disabled' : ''}>↻</button></div></header>${stateError ? `<div class="banner" role="alert">${esc(stateError)} ${state ? '下方是上次讀取的資料。' : ''}<button data-refresh class="text-button">重新連線</button></div>` : ''}<div id="page">${state ? renderPage() : `<div class="no-data" role="status">${busy ? '正在讀取家的筆記…' : '暫時無法讀取家的筆記。請重新連線。'}</div>`}</div><div class="mobile-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div><footer class="page-footer">一點一滴，把日子過好。</footer></main></div>`;
+  app.innerHTML = `<div class="shell ${activeTab==='map'?'map-shell':''}"><aside class="sidebar"><div class="brand"><img src="/icon.svg" alt=""><div>愉悅的家庭管家<small>A LITTLE CARE, EVERY DAY</small></div></div><nav class="nav" aria-label="主要導覽">${Object.entries(tabs).map(([key, [label, glyph]]) => `<button data-tab="${key}" class="${key === activeTab ? 'active' : ''}" ${key === activeTab ? 'aria-current="page"' : ''}>${icon(glyph)}<span class="nav-full">${label}</span><span class="nav-short">${key === 'inventory' ? '物品' : key === 'map' ? '地圖' : label}</span></button>`).join('')}</nav><div class="sidebar-note"><b>把家照顧好，也照顧彼此。</b>少一點忘記，多一點餘裕。<div class="sidebar-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div></div></aside><main class="main"><header class="topbar"><div class="eyebrow">${esc(dateLabel)}</div><div class="status-wrap"><span class="connection ${connected ? '' : 'offline'}">${busy ? '更新中' : connected ? '家庭庫存已連線' : '家庭庫存未連線'}</span><button class="refresh" aria-label="重新整理家庭資料" data-refresh ${busy ? 'disabled' : ''}>↻</button></div></header>${stateError ? `<div class="banner" role="alert">${esc(stateError)} ${state ? '下方是上次讀取的資料。' : ''}<button data-refresh class="text-button">重新連線</button></div>` : ''}<div id="page">${state ? renderPage() : `<div class="no-data" role="status">${busy ? '正在讀取家的筆記…' : '暫時無法讀取家的筆記。請重新連線。'}</div>`}</div><div class="mobile-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div><footer class="page-footer">一點一滴，把日子過好。</footer></main></div>`;
   bindShell();
   bindPage();
   if (activeTab === 'map' && state) floorplan.mount($('#floorplan-root'));
@@ -245,7 +254,7 @@ function renderChat() {
 }
 
 function bindShell() {
-  app.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => { activeTab = button.dataset.tab; history.replaceState(null, '', activeTab === 'map' ? '#map' : location.pathname + location.search); render(); window.scrollTo({ top: 0, behavior: 'instant' }); }));
+  app.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => { const nextTab=button.dataset.tab;if(activeTab==='map'&&nextTab!=='map'&&!floorplan.canLeave())return;activeTab = nextTab; history.replaceState(null, '', activeTab === 'map' ? '#map' : location.pathname + location.search); render(); window.scrollTo({ top: 0, behavior: 'instant' }); }));
   app.querySelectorAll('[data-refresh]').forEach(button => button.addEventListener('click', () => { if (!busy) loadState(); }));
   app.querySelectorAll('[data-logout]').forEach(button => button.addEventListener('click', async () => {
     button.disabled = true;
@@ -522,6 +531,6 @@ function refreshWhenReturning() {
 }
 document.addEventListener('visibilitychange', refreshWhenReturning);
 window.addEventListener('focus', refreshWhenReturning);
-window.addEventListener('hashchange', () => { if (location.hash === '#map' && authenticated) { activeTab = 'map'; render(); } });
+window.addEventListener('hashchange', () => { if(!authenticated)return;const nextTab=location.hash==='#map'?'map':activeTab==='map'?'today':activeTab;if(activeTab==='map'&&nextTab!=='map'&&!floorplan.canLeave()){history.replaceState(null,'','#map');return;}if(nextTab!==activeTab){activeTab=nextTab;render();} });
 window.addEventListener('beforeunload', event => { if (floorplan.dirty) { event.preventDefault(); event.returnValue = ''; } });
 start();

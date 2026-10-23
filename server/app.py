@@ -18,11 +18,13 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import ValidationError
 from . import contracts as c
 from .ai import AIError, Gemini
 from .grocy import Grocy, GrocyError
 from .floorplan import register_floorplan
+from .studio_proxy import register_studio_proxy
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -39,7 +41,7 @@ def fingerprint(state):
     return hashlib.sha256(json.dumps(snapshot, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None):
+def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, studio_url=None, studio_transport=None):
     app = FastAPI(title="愉悅的家庭管家", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.grocy = grocy or Grocy(os.getenv("GROCY_URL", "http://127.0.0.1:9283"), os.getenv("GROCY_API_KEY", ""))
     app.state.ai = ai or Gemini()
@@ -81,6 +83,7 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None):
         return sid
 
     floorplan = register_floorplan(app, authenticated, database, path, lock)
+    studio_delete = register_studio_proxy(app, authenticated, COOKIE, studio_url, studio_transport)
 
     def rate_limit(key, limit, window):
         now = time.monotonic()
@@ -92,39 +95,49 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None):
                 raise HTTPException(429, "操作太頻繁，請稍後再試。")
             values.append(now)
 
+    async def validate_write(request):
+        origin = request.headers.get("origin")
+        expected = str(request.base_url).rstrip("/")
+        # Origin is mandatory for writes. curl/scripts send Origin explicitly.
+        if origin != expected or request.headers.get("sec-fetch-site") in ("cross-site", "same-site"):
+            return JSONResponse({"detail": "此操作只允許從家庭管家同一來源送出。"}, status_code=403)
+        if request.headers.get("content-type", "").split(";")[0] != "application/json":
+            return JSONResponse({"detail": "請使用 application/json。"}, status_code=415)
+        length = request.headers.get("content-length", "0")
+        body_limit = 100000
+        if request.method == "PUT":
+            if request.url.path == c.FLOORPLAN:
+                body_limit = c.FLOORPLAN_BODY_LIMIT
+            elif request.url.path == c.STUDIO_LAYOUT:
+                body_limit = c.STUDIO_BODY_LIMIT
+        if not length.isdigit() or int(length) > body_limit:
+            return JSONResponse({"detail": "請求內容過大。"}, status_code=413)
+        # Enforce actual bytes too: chunked or forged Content-Length must not bypass limits.
+        chunks, received = [], 0
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > body_limit:
+                return JSONResponse({"detail": "請求內容過大。"}, status_code=413)
+            chunks.append(chunk)
+        request._body = b"".join(chunks)
+
     @app.middleware("http")
     async def same_origin(request, call_next):
         if request.url.path.startswith(c.API):
-            if request.method not in ("GET", "HEAD", "OPTIONS"):
-                origin = request.headers.get("origin")
-                expected = str(request.base_url).rstrip("/")
-                # Origin is mandatory for writes. curl/scripts send Origin explicitly.
-                if origin != expected or request.headers.get("sec-fetch-site") in ("cross-site", "same-site"):
-                    return JSONResponse({"detail": "此操作只允許從家庭管家同一來源送出。"}, status_code=403)
-                if request.headers.get("content-type", "").split(";")[0] != "application/json":
-                    return JSONResponse({"detail": "請使用 application/json。"}, status_code=415)
-                length = request.headers.get("content-length", "0")
-                body_limit = c.FLOORPLAN_BODY_LIMIT if request.url.path == c.FLOORPLAN and request.method == "PUT" else 100000
-                if not length.isdigit() or int(length) > body_limit:
-                    return JSONResponse({"detail": "請求內容過大。"}, status_code=413)
-                # Enforce actual bytes too: chunked or forged Content-Length must not bypass limits.
-                chunks, received = [], 0
-                async for chunk in request.stream():
-                    received += len(chunk)
-                    if received > body_limit:
-                        return JSONResponse({"detail": "請求內容過大。"}, status_code=413)
-                    chunks.append(chunk)
-                request._body = b"".join(chunks)
-            response = await call_next(request)
+            rejected = await validate_write(request) if request.method not in ("GET", "HEAD", "OPTIONS") else None
+            response = rejected if rejected is not None else await call_next(request)
             response.headers["Cache-Control"] = "no-store"
         else:
             response = await call_next(request)
             # UI entry points must revalidate together after an application upgrade.
             response.headers["Cache-Control"] = "no-cache"
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
+        embedded = request.url.path.startswith(c.MAP_STUDIO)
+        response.headers["X-Frame-Options"] = "SAMEORIGIN" if embedded else "DENY"
         response.headers["Referrer-Policy"] = "same-origin"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        ancestors = "'self'" if embedded else "'none'"
+        images = "'self' data: blob:" if embedded else "'self' data:"
+        response.headers["Content-Security-Policy"] = f"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src {images}; connect-src 'self'; frame-src 'self'; frame-ancestors {ancestors}; base-uri 'self'; form-action 'self'"
         return response
 
     @app.exception_handler(RequestValidationError)
@@ -288,8 +301,7 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None):
             log(f"已更新 {item['name']}。")
             return {"ok": True}
 
-    @app.delete(c.ITEMS + "/{item_id}")
-    def delete_item(item_id: int, sid=Depends(authenticated)):
+    def delete_empty_item(item_id):
         with lock:
             current = app.state.grocy.state()
             item = find_item(current, item_id)
@@ -300,6 +312,19 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None):
             app.state.grocy.request("DELETE", f"objects/products/{item_id}")
             log(f"已移除零庫存物品 {item['name']}。")
             return {"ok": True}
+
+    @app.delete(c.ITEMS + "/{item_id}")
+    async def delete_item(item_id: str, request: Request, sid=Depends(authenticated)):
+        if not re.fullmatch(r"[1-9][0-9]{0,19}", item_id):
+            raise HTTPException(422, "物品 ID 格式不正確。")
+        try:
+            body = json.loads(await request.body() or b"{}")
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(422, "欄位格式不正確。") from None
+        # Existing item editor sends {}; Studio sends explicit name/location confirmation.
+        if body != {}:
+            return await studio_delete(item_id, request)
+        return await run_in_threadpool(delete_empty_item, int(item_id))
 
     @app.post(c.ACTIONS)
     def action(body: c.Action, request: Request, sid=Depends(authenticated)):

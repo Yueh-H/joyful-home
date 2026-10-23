@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+Replace the legacy `/#map` editor with the vector furniture map while retaining the household navigation, inventory, shopping and chat. A fixed same-origin bridge reuses the existing Studio layout and Grocy inventory; private data is not copied. Parent refresh preserves the map draft, and navigation protects unsaved edits.
+
 ## 0.2.0 — 2026-10-23
 
 Add a private editable household map: room polygons, draggable storage markers linked to Grocy locations, inventory search and position lookup, and authenticated background images. Map saves use revision checks to preserve concurrent drafts. Private floorplans remain runtime data and are excluded from AI requests and public source.
