@@ -37,13 +37,13 @@
        │
        ▼
 愉悅的家庭管家（FastAPI + 原生 HTML / CSS / JavaScript）
-       ├── Grocy API → 庫存、效期、地點、採買與物品附加資料
+       ├── Firestore → 庫存、效期、位置、採買與新版地圖配置
        └── Gemini API → 中文理解、資料查詢、操作提案
 ```
 
-[Grocy](https://github.com/grocy/grocy) 是唯一的庫存資料來源。這個專案提供中文手機介面與對話整合，不另外複製一份庫存資料庫。它是獨立 companion app，並非 Grocy 官方版本。
+正式家庭環境以 Firestore 為唯一資料來源：`INVENTORY_BACKEND=firestore`。庫存、位置、採買和新版家具配置都直接讀寫同一個 Firebase 專案，不在 Grocy 另外同步一份。舊 [Grocy](https://github.com/grocy/grocy) adapter 保留相容與搬遷用途；雲端連線失敗會回報錯誤，不回寫舊資料庫。
 
-AI 回答會取得當下庫存與日期；未知的數量、位置或效期應補問。推薦食譜不會自動扣庫存。前端不持有 Grocy 或 Gemini API 金鑰。
+AI 回答會取得當下庫存與日期；未知的數量、位置或效期應補問。推薦食譜不會自動扣庫存。Firebase 服務憑證與 Gemini API 金鑰只在後端，瀏覽器不能直接讀寫私人資料庫。
 
 ### 用地圖找物品
 
@@ -53,9 +53,13 @@ AI 回答會取得當下庫存與日期；未知的數量、位置或效期應�
 
 新版地圖服務的原始碼保留在相鄰 `../joyful-home-map` 資料夾。先啟動本家庭服務，再於該資料夾執行 `uv run python scripts/start.py`；家庭管家透過同源路徑 `/map-studio/` 載入它，日常仍使用 8765 的同一個網址。未啟動地圖服務時，其他家庭功能仍可使用。
 
-家具配置與私人底圖只存本機資料 volume，不放進公開 repo，也不傳給 Gemini。舊底圖 API 保留供新版參考圖讀取；舊圖釘介面已被新版替換。完整地圖備份另需保留 Studio 的 `map-data` volume。
+新版家具配置存於 Firestore，不放進公開 repo，也不傳給 Gemini。原始參考底圖仍保留在本機私人 volume，由舊底圖 API 提供參考圖；正式地圖使用雲端的向量配置。舊圖釘介面已被新版替換。
 
 ## 本機啟動
+
+已設定的 Firestore 家庭環境直接啟動 `docker compose --profile app up -d --build app`，再於相鄰地圖資料夾執行啟動腳本。需保留私人 `firebase-credentials` volume；不要重新執行 Grocy 初始化。新環境的設定、一次性搬遷和資料範圍見 [Firestore 設定](docs/firestore-setup.md)。
+
+以下是舊 Grocy 相容模式的首次建立流程：
 
 需要 Docker Compose 與 Python 3；應用程式本身在容器內使用 Python 3.12。
 
@@ -105,7 +109,7 @@ uv run python scripts/seed_demo.py --clear-demo --confirm-demo
 
 ## 手機與家庭共用
 
-- 兩部手機登入同一個家庭服務，即讀取同一份 Grocy 資料。
+- 兩部手機登入同一個家庭服務，即讀取同一份 Firestore 家庭資料。
 - 網頁會重新載入最新資料；需要網路連線，不能離線修改庫存。
 - 安裝到主畫面與 service worker 需要 HTTPS（或本機 localhost）；一般區網 HTTP 仍能瀏覽使用。
 - 要在外面或全天使用，請將服務放在常開主機 / NAS，設定 HTTPS 與家庭登入；也可以經由自己的私人網路連回家。
@@ -117,9 +121,9 @@ uv run python scripts/seed_demo.py --clear-demo --confirm-demo
 
 本專案以 MIT 授權公開程式碼。家庭資料、API 金鑰、登入密碼、Docker volumes 和執行紀錄不屬於公開 repo。
 
-GitHub 用於原始碼和版本管理；GitHub Pages 的靜態服務不能單獨執行 Grocy 與這個後端。
+GitHub 用於原始碼和版本管理；GitHub Pages 的靜態服務不能單獨執行這個後端。
 
-停止容器時不要移除資料 volume。資料備份需要包含 `data/grocy/`（完整庫存）、`app-data` volume（登入、提案、操作紀錄、地圖與私人底圖）與本機設定（分開安全保存）；網頁 JSON 匯出包含地圖座標但不包含底圖，不等同完整服務還原。
+正式物品、位置、採買與家具配置保存在 Firestore，容器重啟不會清空。登入、提案與操作紀錄仍在本機 `app-data` volume，原始參考底圖也在本機；完整備份須另保存這些資料與私人設定／憑證。舊 Grocy 和 SQLite volumes 保留作搬遷前備份，不再接收正式寫入。資料庫上雲不等於網頁已部署，現在仍由這台 Mac 提供 Wi-Fi 網頁。
 
 ## 驗證
 

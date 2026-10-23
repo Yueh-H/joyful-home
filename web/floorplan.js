@@ -19,7 +19,7 @@ export function createFloorplan({ request, notify, onExpired }) {
   }
   const ensure=()=>locationList===null?refresh():Promise.resolve(locations());
   function unmount(){frame?.remove();frame=null;root=null;ready=false;dirty=false;}
-  function reset(){epoch++;send({type:MAP_MESSAGES.expired});unmount();locationList=null;loading=null;pendingFocus=null;}
+  function reset(){epoch++;try{const child=frame?.contentWindow;if(child)child.dispatchEvent(new child.Event(MAP_MESSAGES.expired));}catch{/* Child may not have loaded yet. */}send({type:MAP_MESSAGES.expired});unmount();locationList=null;loading=null;pendingFocus=null;}
   function mount(node){
     if(!node)return;if(root===node&&frame?.isConnected)return;
     unmount();root=node;frame=document.createElement('iframe');frame.className='studio-frame';frame.title='家的地圖：家具配置與收納物品';frame.src=API.mapStudio;frame.setAttribute('referrerpolicy','same-origin');root.replaceChildren(frame);ensure();

@@ -1,4 +1,4 @@
-"""Same-origin household API. Inventory is never persisted outside Grocy."""
+"""Same-origin household API with an explicitly selected authoritative inventory."""
 from collections import defaultdict, deque
 from datetime import datetime
 import copy
@@ -23,6 +23,7 @@ from pydantic import ValidationError
 from . import contracts as c
 from .ai import AIError, Gemini
 from .grocy import Grocy, GrocyError
+from .firestore_inventory import FirestoreInventory, FirestoreInventoryError
 from .floorplan import register_floorplan
 from .studio_proxy import register_studio_proxy
 
@@ -43,7 +44,16 @@ def fingerprint(state):
 
 def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, studio_url=None, studio_transport=None):
     app = FastAPI(title="愉悅的家庭管家", docs_url=None, redoc_url=None, openapi_url=None)
-    app.state.grocy = grocy or Grocy(os.getenv("GROCY_URL", "http://127.0.0.1:9283"), os.getenv("GROCY_API_KEY", ""))
+    backend = os.getenv("INVENTORY_BACKEND", "grocy")
+    if grocy is not None:
+        app.state.grocy = grocy
+    elif backend == "firestore":
+        app.state.grocy = FirestoreInventory()
+    elif backend == "grocy":
+        app.state.grocy = Grocy(os.getenv("GROCY_URL", "http://127.0.0.1:9283"), os.getenv("GROCY_API_KEY", ""))
+    else:
+        raise ValueError("Unsupported inventory backend")
+    firestore_mode = getattr(app.state.grocy, "backend", None) == "firestore"
     app.state.ai = ai or Gemini()
     household_password = password if password is not None else os.getenv("HOME_PASSWORD", "")
     session_secret = secret if secret is not None else os.getenv("SESSION_SECRET", "")
@@ -83,7 +93,8 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
         return sid
 
     floorplan = register_floorplan(app, authenticated, database, path, lock)
-    studio_delete = register_studio_proxy(app, authenticated, COOKIE, studio_url, studio_transport)
+    studio_delete = register_studio_proxy(app, authenticated, COOKIE, studio_url, studio_transport,
+                                         locations=app.state.grocy.locations if firestore_mode else None)
 
     def rate_limit(key, limit, window):
         now = time.monotonic()
@@ -148,6 +159,10 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
     async def grocy_error(request, exc):
         return JSONResponse({"detail": str(exc)}, status_code=502)
 
+    @app.exception_handler(FirestoreInventoryError)
+    async def firestore_error(request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
+
     @app.exception_handler(AIError)
     async def ai_error(request, exc):
         return JSONResponse({"detail": str(exc)}, status_code=503)
@@ -160,7 +175,8 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
         state = app.state.grocy.state()
         with database() as db:
             state["activity"] = [{"id": r[0], "at": r[1], "message": r[2]} for r in db.execute("SELECT id,at,message FROM activity ORDER BY rowid DESC LIMIT 60")]
-        state.update(ai={"enabled": app.state.ai.enabled, "provider": "Gemini"}, grocy={"connected": True}, today=today())
+        state.update(ai={"enabled": app.state.ai.enabled, "provider": "Gemini"},
+                     grocy={"connected": True}, inventory={"backend": "firestore" if firestore_mode else "grocy"}, today=today())
         return state
 
     def find_item(state, pid):
@@ -321,6 +337,18 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
             body = json.loads(await request.body() or b"{}")
         except (ValueError, UnicodeDecodeError):
             raise HTTPException(422, "欄位格式不正確。") from None
+        if firestore_mode:
+            if body == {}:
+                result = await run_in_threadpool(app.state.grocy.delete_item, int(item_id), require_empty=True)
+            else:
+                if (not isinstance(body, dict) or set(body) != {"confirm_name", "expected_location_id"}
+                        or not isinstance(body["confirm_name"], str) or not 1 <= len(body["confirm_name"]) <= 200
+                        or type(body["expected_location_id"]) is not int or body["expected_location_id"] <= 0):
+                    raise HTTPException(422, "請提供正確的物品名稱與儲位確認。")
+                result = await run_in_threadpool(app.state.grocy.delete_item, int(item_id),
+                    confirm_name=body["confirm_name"], expected_location_id=body["expected_location_id"])
+            log(f"已移除物品編號 {item_id}。")
+            return result
         # Existing item editor sends {}; Studio sends explicit name/location confirmation.
         if body != {}:
             return await studio_delete(item_id, request)
@@ -427,7 +455,7 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
             except Exception:
                 with database() as db:
                     db.execute("UPDATE proposals SET status='failed' WHERE id=?", (proposal_id,))
-                raise HTTPException(502, f"操作未全部完成（已完成 {completed} 步）；請重新整理核對 Grocy，這份預覽已鎖定，避免重複寫入。") from None
+                raise HTTPException(502, f"操作未全部完成（已完成 {completed} 步）；請重新整理核對家庭庫存，這份預覽已鎖定，避免重複寫入。") from None
             with database() as db:
                 db.execute("UPDATE proposals SET status='applied' WHERE id=?", (proposal_id,))
             return {"ok": True, "message": f"已確認並完成 {completed} 項變更。"}

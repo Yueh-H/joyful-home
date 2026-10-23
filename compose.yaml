@@ -27,11 +27,17 @@ services:
       GROCY_URL: http://grocy
       RUNTIME_DB: /app/data/app.sqlite3
       MAP_STUDIO_URL: http://joyful-home-map-studio-1:8780
+      INVENTORY_BACKEND: ${INVENTORY_BACKEND:-grocy}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIRESTORE_DATABASE_ID: ${FIRESTORE_DATABASE_ID:-(default)}
+      FIRESTORE_HOUSEHOLD_ID: ${FIRESTORE_HOUSEHOLD_ID:-home}
+      GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/firebase.json
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     ports:
       - "${HOME_BIND:-127.0.0.1}:8765:8765"
     volumes:
       - app-data:/app/data
+      - firebase-credentials:/app/credentials:ro
     depends_on:
       grocy:
         condition: service_healthy
@@ -39,3 +45,6 @@ services:
 
 volumes:
   app-data:
+  firebase-credentials:
+    external: true
+    name: joyful-home_firebase-credentials

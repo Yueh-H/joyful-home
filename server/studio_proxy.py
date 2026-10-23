@@ -6,11 +6,12 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import Response
+from starlette.concurrency import run_in_threadpool
 
 from . import contracts as c
 
 
-def register_studio_proxy(app, authenticated, cookie_name, studio_url=None, transport=None):
+def register_studio_proxy(app, authenticated, cookie_name, studio_url=None, transport=None, locations=None):
     upstream = (studio_url or os.getenv("MAP_STUDIO_URL", "http://127.0.0.1:8780")).rstrip("/")
     parsed = urlsplit(upstream)
     if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username
@@ -66,6 +67,8 @@ def register_studio_proxy(app, authenticated, cookie_name, studio_url=None, tran
         return await forward(request, path, media_type, safe_types)
 
     async def api(request: Request, sid=Depends(authenticated)):
+        if request.url.path == c.LOCATIONS and locations is not None:
+            return {"locations": await run_in_threadpool(locations)}
         if request.url.path == c.STUDIO_REFERENCE:
             return await forward(request, c.STUDIO_REFERENCE, None, {"image/png", "image/jpeg", "image/webp"})
         return await forward(request, request.url.path)

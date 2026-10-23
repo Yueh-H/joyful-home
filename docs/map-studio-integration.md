@@ -1,5 +1,7 @@
 # Replace the legacy map at /#map
 
+Storage update: the active deployment now uses Firestore as the single primary database; see [Firestore contract](firestore-migration-contract.md). The bridge/navigation rules below remain in force; Grocy mentions describe the pre-migration compatibility mode.
+
 User explicitly wants the new vector furniture map to replace the old map inside the original household UI at port 8765/#map. Keep original navigation, inventory/new-item/shopping/chat. Do not redirect the whole page to 8780 or duplicate map/inventory data. The separate joyful-home-map folder stays the implementation/service for the vector map and its current geometry store.
 
 ## Same-origin bridge
