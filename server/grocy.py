@@ -37,6 +37,16 @@ class Grocy:
                 return int(entry["id"])
         return int(self.request("POST", f"objects/{entity}", {"name": name, **(extra or {})})["created_object_id"])
 
+    def locations(self):
+        return [{"id": int(row["id"]), "name": row["name"]} for row in self.objects("locations")]
+
+    def create_location(self, name):
+        return {"id": self.ensure("locations", name), "name": name}
+
+    def rename_location(self, location_id, name):
+        self.request("PUT", f"objects/locations/{location_id}", {"name": name})
+        return {"id": location_id, "name": name}
+
     def bootstrap(self):
         if self.ready:
             return
@@ -94,7 +104,7 @@ class Grocy:
                 next_due = None
             items.append({"id": pid, "name": product["name"], "category": category,
                 "quantity": sum(float(r["amount"]) for r in rows), "unit": units.get(int(product["qu_id_stock"]), "個"),
-                "location": locations.get(int(product["location_id"]), "未分類"),
+                "location": locations.get(int(product["location_id"]), "未分類"), "location_id": int(product["location_id"]),
                 "min_quantity": float(product.get("min_stock_amount") or 0), "best_before": min(dates) if dates else None,
                 "opened": str(nearest.get("open", "0")) == "1" if nearest else False, "model": fields.get("model") or "",
                 "description": product.get("description") or "", "interval_days": interval, "last_maintained": last, "next_due": next_due})

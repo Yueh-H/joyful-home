@@ -1,4 +1,5 @@
 import { API, CATEGORIES } from './contracts.js';
+import { createFloorplan } from './floorplan.js';
 
 const $ = selector => document.querySelector(selector);
 const app = $('#app');
@@ -7,8 +8,8 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${esc(name)}"></use></svg>`;
 const category = key => CATEGORIES[key] || { label: '未分類', icon: 'grid', hint: '' };
 const fmt = value => new Intl.NumberFormat('zh-TW', { maximumFractionDigits: 3 }).format(Number(value) || 0);
-const tabs = { today: ['今天', 'home'], inventory: ['家裡有什麼', 'grid'], shopping: ['採買', 'bag'], chat: ['問管家', 'chat'] };
-let activeTab = 'today';
+const tabs = { today: ['今天', 'home'], inventory: ['家裡有什麼', 'grid'], shopping: ['採買', 'bag'], chat: ['問管家', 'chat'], map: ['家的地圖', 'home'] };
+let activeTab = location.hash === '#map' ? 'map' : 'today';
 let filter = 'all';
 let search = '';
 let state = null;
@@ -23,6 +24,10 @@ let returnFocus = null;
 let authenticated = false;
 let lastUpdated = null;
 let chatDraft = '';
+const floorplan = createFloorplan({
+  request: async (path, body, method) => body === undefined ? (await api(path)).json() : request(path, body, method),
+  getItems: () => state?.items || [], notify, editItem, onItemsChanged: () => loadState({ background: true }),
+});
 
 function notify(message, error = false) {
   const toast = $('#toast');
@@ -47,7 +52,7 @@ async function api(path, options = {}) {
     let detail = `連線未完成（${response.status}），請稍後再試。`;
     try { const data = await response.json(); if (typeof data.detail === 'string') detail = data.detail; } catch { /* Non-JSON gateway error. */ }
     if (response.status === 401 && path !== API.login && path !== API.session) loggedOut('登入已過期，請重新輸入家庭密碼。');
-    throw new Error(detail);
+    const error = new Error(detail); error.status = response.status; throw error;
   }
   return response;
 }
@@ -64,6 +69,7 @@ function actionRequester() {
 
 function loggedOut(message = '', configured = true) {
   sessionGeneration++;
+  floorplan.reset();
   authenticated = false;
   lastUpdated = null;
   chatDraft = '';
@@ -74,6 +80,7 @@ function loggedOut(message = '', configured = true) {
   busy = false;
   stateError = '';
   if (dialog.open) dialog.close();
+  dialog.replaceChildren();
   renderLogin(message, configured);
 }
 
@@ -107,6 +114,7 @@ async function loadState({ background = false } = {}) {
     if (generation !== sessionGeneration) return;
     if (!Array.isArray(next.items) || !Array.isArray(next.shopping)) throw new Error('家的資料格式不完整，請重新整理。');
     state = next;
+    floorplan.refresh();
     lastUpdated = new Date();
     stateError = next.grocy?.connected ? '' : '目前無法連上家庭庫存。恢復連線後，再讀取最新資料。';
   } catch (error) {
@@ -141,9 +149,11 @@ function render() {
   const connected = !!state?.grocy?.connected && !stateError;
   const today = state?.today;
   const dateLabel = today ? new Intl.DateTimeFormat('zh-TW', { month: 'long', day: 'numeric', weekday: 'long', timeZone: 'Asia/Taipei' }).format(new Date(`${today}T12:00:00+08:00`)) : '我們的家的筆記';
-  app.innerHTML = `<div class="shell"><aside class="sidebar"><div class="brand"><img src="/icon.svg" alt=""><div>愉悅的家庭管家<small>A LITTLE CARE, EVERY DAY</small></div></div><nav class="nav" aria-label="主要導覽">${Object.entries(tabs).map(([key, [label, glyph]]) => `<button data-tab="${key}" class="${key === activeTab ? 'active' : ''}" ${key === activeTab ? 'aria-current="page"' : ''}>${icon(glyph)}<span>${label}</span></button>`).join('')}</nav><div class="sidebar-note"><b>把家照顧好，也照顧彼此。</b>少一點忘記，多一點餘裕。<div class="sidebar-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div></div></aside><main class="main"><header class="topbar"><div class="eyebrow">${esc(dateLabel)}</div><div class="status-wrap"><span class="connection ${connected ? '' : 'offline'}">${busy ? '更新中' : connected ? '家庭庫存已連線' : '家庭庫存未連線'}</span><button class="refresh" aria-label="重新整理家庭資料" data-refresh ${busy ? 'disabled' : ''}>↻</button></div></header>${stateError ? `<div class="banner" role="alert">${esc(stateError)} ${state ? '下方是上次讀取的資料。' : ''}<button data-refresh class="text-button">重新連線</button></div>` : ''}<div id="page">${state ? renderPage() : `<div class="no-data" role="status">${busy ? '正在讀取家的筆記…' : '暫時無法讀取家的筆記。請重新連線。'}</div>`}</div><div class="mobile-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div><footer class="page-footer">一點一滴，把日子過好。</footer></main></div>`;
+  floorplan.unmount();
+  app.innerHTML = `<div class="shell"><aside class="sidebar"><div class="brand"><img src="/icon.svg" alt=""><div>愉悅的家庭管家<small>A LITTLE CARE, EVERY DAY</small></div></div><nav class="nav" aria-label="主要導覽">${Object.entries(tabs).map(([key, [label, glyph]]) => `<button data-tab="${key}" class="${key === activeTab ? 'active' : ''}" ${key === activeTab ? 'aria-current="page"' : ''}>${icon(glyph)}<span class="nav-full">${label}</span><span class="nav-short">${key === 'inventory' ? '物品' : key === 'map' ? '地圖' : label}</span></button>`).join('')}</nav><div class="sidebar-note"><b>把家照顧好，也照顧彼此。</b>少一點忘記，多一點餘裕。<div class="sidebar-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div></div></aside><main class="main"><header class="topbar"><div class="eyebrow">${esc(dateLabel)}</div><div class="status-wrap"><span class="connection ${connected ? '' : 'offline'}">${busy ? '更新中' : connected ? '家庭庫存已連線' : '家庭庫存未連線'}</span><button class="refresh" aria-label="重新整理家庭資料" data-refresh ${busy ? 'disabled' : ''}>↻</button></div></header>${stateError ? `<div class="banner" role="alert">${esc(stateError)} ${state ? '下方是上次讀取的資料。' : ''}<button data-refresh class="text-button">重新連線</button></div>` : ''}<div id="page">${state ? renderPage() : `<div class="no-data" role="status">${busy ? '正在讀取家的筆記…' : '暫時無法讀取家的筆記。請重新連線。'}</div>`}</div><div class="mobile-tools"><button class="text-button" data-export>匯出家的筆記</button><button class="text-button" data-logout>登出</button></div><footer class="page-footer">一點一滴，把日子過好。</footer></main></div>`;
   bindShell();
   bindPage();
+  if (activeTab === 'map' && state) floorplan.mount($('#floorplan-root'));
   const status = app.querySelector('.status-wrap');
   if (lastUpdated && status) {
     const time = new Intl.DateTimeFormat('zh-TW', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Taipei', hour12: false }).format(lastUpdated);
@@ -160,6 +170,7 @@ function render() {
 }
 
 function renderPage() {
+  if (activeTab === 'map') return '<div id="floorplan-root"></div>';
   if (activeTab === 'inventory') return renderInventory();
   if (activeTab === 'shopping') return renderShopping();
   if (activeTab === 'chat') return renderChat();
@@ -191,7 +202,7 @@ function inventoryList() {
   if (!items.length) return empty('grid', state.items.length ? '這裡還沒有找到物品' : '家的物品，從這裡開始記', state.items.length ? '換個關鍵字或分類找找，也可以新增一樣物品。' : '不必一次整理完，先記下手邊最常用的一樣就好。', addButton('記下第一樣物品'));
   return items.map(item => {
     const group = category(item.category);
-    return `<article class="card item"><div class="item-top"><span class="icon-tile">${icon(group.icon)}</span><div class="item-title"><h3>${esc(item.name)}</h3><p>${esc(group.label)} · ${esc(item.location || '未分類')}</p></div><button class="edit" data-edit="${Number(item.id)}" aria-label="編輯 ${esc(item.name)}">編輯</button></div><div class="item-quantity"><strong>${fmt(item.quantity)}</strong>${esc(item.unit)}<span style="margin-left:auto">最低 ${fmt(item.min_quantity)} ${esc(item.unit)}</span></div><div class="item-meta">${item.quantity < item.min_quantity ? '<span class="tag warn">需要補充</span>' : ''}${item.best_before ? `<span class="tag ${item.best_before < state.today ? 'danger' : item.best_before <= datePlus(state.today, 7) ? 'warn' : ''}">效期 ${esc(item.best_before)}</span>` : ''}${item.opened ? '<span class="tag">已開封</span>' : ''}${item.model ? `<span class="tag">${esc(item.model)}</span>` : ''}${item.next_due ? `<span class="tag ${item.next_due <= state.today ? 'warn' : ''}">下次維護 ${esc(item.next_due)}</span>` : ''}${item.last_maintained ? `<span class="tag">上次維護 ${esc(item.last_maintained)}</span>` : ''}${item.interval_days ? `<span class="tag">每 ${fmt(item.interval_days)} 天維護</span>` : ''}</div>${item.description ? `<p class="item-note">${esc(item.description)}</p>` : ''}<div class="item-actions"><button class="button secondary small" data-action="purchase" data-id="${Number(item.id)}">購入</button><button class="button ghost small" data-action="consume" data-id="${Number(item.id)}" ${item.quantity <= 0 ? 'disabled' : ''}>使用</button><button class="button ghost small" data-action="shopping_add" data-id="${Number(item.id)}">待買</button>${item.category === 'maintenance' || item.interval_days ? `<button class="button ghost small" data-action="maintain" data-id="${Number(item.id)}">已維護</button>` : ''}</div></article>`;
+    return `<article class="card item"><div class="item-top"><span class="icon-tile">${icon(group.icon)}</span><div class="item-title"><h3>${esc(item.name)}</h3><p>${esc(group.label)} · ${esc(item.location || '未分類')}</p></div><button class="edit" data-edit="${Number(item.id)}" aria-label="編輯 ${esc(item.name)}">編輯</button></div><div class="item-quantity"><strong>${fmt(item.quantity)}</strong>${esc(item.unit)}<span style="margin-left:auto">最低 ${fmt(item.min_quantity)} ${esc(item.unit)}</span></div><div class="item-meta">${item.quantity < item.min_quantity ? '<span class="tag warn">需要補充</span>' : ''}${item.best_before ? `<span class="tag ${item.best_before < state.today ? 'danger' : item.best_before <= datePlus(state.today, 7) ? 'warn' : ''}">效期 ${esc(item.best_before)}</span>` : ''}${item.opened ? '<span class="tag">已開封</span>' : ''}${item.model ? `<span class="tag">${esc(item.model)}</span>` : ''}${item.next_due ? `<span class="tag ${item.next_due <= state.today ? 'warn' : ''}">下次維護 ${esc(item.next_due)}</span>` : ''}${item.last_maintained ? `<span class="tag">上次維護 ${esc(item.last_maintained)}</span>` : ''}${item.interval_days ? `<span class="tag">每 ${fmt(item.interval_days)} 天維護</span>` : ''}</div>${item.description ? `<p class="item-note">${esc(item.description)}</p>` : ''}<div class="item-actions"><button class="button ghost small" data-look-location="${Number(item.id)}">看位置</button><button class="button secondary small" data-action="purchase" data-id="${Number(item.id)}">購入</button><button class="button ghost small" data-action="consume" data-id="${Number(item.id)}" ${item.quantity <= 0 ? 'disabled' : ''}>使用</button><button class="button ghost small" data-action="shopping_add" data-id="${Number(item.id)}">待買</button>${item.category === 'maintenance' || item.interval_days ? `<button class="button ghost small" data-action="maintain" data-id="${Number(item.id)}">已維護</button>` : ''}</div></article>`;
   }).join('');
 }
 
@@ -234,7 +245,7 @@ function renderChat() {
 }
 
 function bindShell() {
-  app.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => { activeTab = button.dataset.tab; render(); window.scrollTo({ top: 0, behavior: 'instant' }); }));
+  app.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => { activeTab = button.dataset.tab; history.replaceState(null, '', activeTab === 'map' ? '#map' : location.pathname + location.search); render(); window.scrollTo({ top: 0, behavior: 'instant' }); }));
   app.querySelectorAll('[data-refresh]').forEach(button => button.addEventListener('click', () => { if (!busy) loadState(); }));
   app.querySelectorAll('[data-logout]').forEach(button => button.addEventListener('click', async () => {
     button.disabled = true;
@@ -255,6 +266,7 @@ function bindShell() {
 }
 
 function bindPage() {
+  bindLocationLinks(app);
   app.querySelectorAll('[data-add]').forEach(button => button.addEventListener('click', () => editItem()));
   app.querySelectorAll('[data-edit]').forEach(button => button.addEventListener('click', () => editItem(state.items.find(item => item.id === Number(button.dataset.edit)))));
   app.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => actionDialog(button.dataset.action, Number(button.dataset.id))));
@@ -286,7 +298,18 @@ function bindPage() {
   app.querySelector('[data-apply]')?.addEventListener('click', applyProposal);
 }
 
+function bindLocationLinks(node) {
+  node.querySelectorAll('[data-look-location]').forEach(button => button.addEventListener('click', async () => {
+    const item = state?.items.find(value => value.id === Number(button.dataset.lookLocation));
+    if (!item) return;
+    activeTab = 'map'; history.replaceState(null, '', '#map'); render();
+    await floorplan.focusItem(item);
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }));
+}
+
 function bindInventoryList() {
+  bindLocationLinks($('#inventory-list'));
   $('#inventory-list').querySelectorAll('[data-add]').forEach(button => button.addEventListener('click', () => editItem()));
   $('#inventory-list').querySelectorAll('[data-edit]').forEach(button => button.addEventListener('click', () => editItem(state.items.find(item => item.id === Number(button.dataset.edit)))));
   $('#inventory-list').querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => actionDialog(button.dataset.action, Number(button.dataset.id))));
@@ -335,9 +358,16 @@ function bindDialogForm(handler) {
   });
 }
 
-function editItem(item) {
-  const initial = item || { category: filter === 'all' ? 'food' : filter, quantity: 0, unit: '個', min_quantity: 0, location: '', opened: false };
-  showDialog(item ? '編輯家的物品' : '記下一樣物品', `<form><div class="form-grid">${field('物品名稱', 'name', 'text', initial.name, 'required maxlength="120" autocomplete="off"', true)}<label class="field"><span>分類</span><select name="category">${Object.entries(CATEGORIES).map(([key, value]) => `<option value="${key}" ${initial.category === key ? 'selected' : ''}>${value.label}</option>`).join('')}</select></label>${field('放在哪裡', 'location', 'text', initial.location, 'placeholder="例如：廚房上櫃" maxlength="120"')}${field('目前數量', 'quantity', 'number', initial.quantity, 'min="0" step="any" required')}${field('計量單位', 'unit', 'text', initial.unit, 'required maxlength="40" placeholder="瓶、包、個…"')}${field('最低保有量', 'min_quantity', 'number', initial.min_quantity, 'min="0" step="any" required')}${field('最近批次效期', 'best_before', 'date', initial.best_before)}${field('型號／規格', 'model', 'text', initial.model, 'maxlength="160"', true)}${field('維護週期（天）', 'interval_days', 'number', initial.interval_days, 'min="1" step="1" placeholder="沒有週期可留白"')}${field('上次維護日期', 'last_maintained', 'date', initial.last_maintained)}<label class="field full"><span>備註</span><textarea name="description" rows="2" maxlength="2000" placeholder="保存方式、使用提醒，或家人想知道的事…">${esc(initial.description)}</textarea></label></div><label class="checkbox-label"><input name="opened" type="checkbox" ${initial.opened ? 'checked' : ''}>最近批次已開封</label>${dialogActions(item ? '儲存變更' : '記好了')}</form>`);
+async function editItem(item, prefilledLocation = '') {
+  const generation = sessionGeneration;
+  await floorplan.ensure();
+  if (generation !== sessionGeneration || !authenticated) return;
+  const initial = item || { category: filter === 'all' ? 'food' : filter, quantity: 0, unit: '個', min_quantity: 0, location: prefilledLocation, opened: false };
+  showDialog(item ? '編輯家的物品' : '記下一樣物品', `<form><div class="form-grid">${field('物品名稱', 'name', 'text', initial.name, 'required maxlength="120" autocomplete="off"', true)}<label class="field"><span>分類</span><select name="category">${Object.entries(CATEGORIES).map(([key, value]) => `<option value="${key}" ${initial.category === key ? 'selected' : ''}>${value.label}</option>`).join('')}</select></label>${field('放在哪裡', 'location', 'text', initial.location, 'placeholder="例如：廚房上櫃" maxlength="120" list="home-location-options"')}${field('目前數量', 'quantity', 'number', initial.quantity, 'min="0" step="any" required')}${field('計量單位', 'unit', 'text', initial.unit, 'required maxlength="40" placeholder="瓶、包、個…"')}${field('最低保有量', 'min_quantity', 'number', initial.min_quantity, 'min="0" step="any" required')}${field('最近批次效期', 'best_before', 'date', initial.best_before)}${field('型號／規格', 'model', 'text', initial.model, 'maxlength="160"', true)}${field('維護週期（天）', 'interval_days', 'number', initial.interval_days, 'min="1" step="1" placeholder="沒有週期可留白"')}${field('上次維護日期', 'last_maintained', 'date', initial.last_maintained)}<label class="field full"><span>備註</span><textarea name="description" rows="2" maxlength="2000" placeholder="保存方式、使用提醒，或家人想知道的事…">${esc(initial.description)}</textarea></label></div><label class="checkbox-label"><input name="opened" type="checkbox" ${initial.opened ? 'checked' : ''}>最近批次已開封</label>${dialogActions(item ? '儲存變更' : '記好了')}</form>`);
+  const choices = document.createElement('datalist');
+  choices.id = 'home-location-options';
+  choices.innerHTML = floorplan.locations().map(value => `<option value="${esc(value.name)}"></option>`).join('');
+  dialog.append(choices);
   bindDialogForm(data => {
     const payload = Object.fromEntries(data);
     ['quantity', 'min_quantity'].forEach(key => { payload[key] = Number(payload[key]); });
@@ -492,4 +522,6 @@ function refreshWhenReturning() {
 }
 document.addEventListener('visibilitychange', refreshWhenReturning);
 window.addEventListener('focus', refreshWhenReturning);
+window.addEventListener('hashchange', () => { if (location.hash === '#map' && authenticated) { activeTab = 'map'; render(); } });
+window.addEventListener('beforeunload', event => { if (floorplan.dirty) { event.preventDefault(); event.returnValue = ''; } });
 start();

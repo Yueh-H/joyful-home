@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from . import contracts as c
 from .ai import AIError, Gemini
 from .grocy import Grocy, GrocyError
+from .floorplan import register_floorplan
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -79,6 +80,8 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None):
             raise HTTPException(401, "請先登入家庭管家。")
         return sid
 
+    floorplan = register_floorplan(app, authenticated, database, path, lock)
+
     def rate_limit(key, limit, window):
         now = time.monotonic()
         with lock:
@@ -101,12 +104,23 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None):
                 if request.headers.get("content-type", "").split(";")[0] != "application/json":
                     return JSONResponse({"detail": "請使用 application/json。"}, status_code=415)
                 length = request.headers.get("content-length", "0")
-                if not length.isdigit() or int(length) > 100000:
+                body_limit = c.FLOORPLAN_BODY_LIMIT if request.url.path == c.FLOORPLAN and request.method == "PUT" else 100000
+                if not length.isdigit() or int(length) > body_limit:
                     return JSONResponse({"detail": "請求內容過大。"}, status_code=413)
+                # Enforce actual bytes too: chunked or forged Content-Length must not bypass limits.
+                chunks, received = [], 0
+                async for chunk in request.stream():
+                    received += len(chunk)
+                    if received > body_limit:
+                        return JSONResponse({"detail": "請求內容過大。"}, status_code=413)
+                    chunks.append(chunk)
+                request._body = b"".join(chunks)
             response = await call_next(request)
             response.headers["Cache-Control"] = "no-store"
         else:
             response = await call_next(request)
+            # UI entry points must revalidate together after an application upgrade.
+            response.headers["Cache-Control"] = "no-cache"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "same-origin"
@@ -255,7 +269,7 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None):
     @app.get(c.EXPORT)
     def export(sid=Depends(authenticated)):
         with lock:
-            return JSONResponse(get_state(), headers={"Content-Disposition": f'attachment; filename="joyful-home-{today()}.json"'})
+            return JSONResponse({**get_state(), "floorplan": floorplan.read()}, headers={"Content-Disposition": f'attachment; filename="joyful-home-{today()}.json"'})
 
     @app.post(c.ITEMS)
     def create_item(body: c.ItemCreate, sid=Depends(authenticated)):

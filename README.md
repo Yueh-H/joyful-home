@@ -8,6 +8,7 @@
 
 - **今天**：查看快到期食材、低庫存用品與維護日期。
 - **家裡有什麼**：搜尋、分類、新增及編輯物品，記錄購買、消耗、位置與規格。
+- **家的地圖**：用可編輯的房間輪廓與收納位置標記找物品；支援自己的私人平面底圖。
 - **採買**：共用食材與家用品清單，買完依實際數量入庫。
 - **問管家**：用繁體中文查詢與整理家庭紀錄；寫入前顯示辨識結果，再一鍵套用。
 
@@ -43,6 +44,16 @@
 [Grocy](https://github.com/grocy/grocy) 是唯一的庫存資料來源。這個專案提供中文手機介面與對話整合，不另外複製一份庫存資料庫。它是獨立 companion app，並非 Grocy 官方版本。
 
 AI 回答會取得當下庫存與日期；未知的數量、位置或效期應補問。推薦食譜不會自動扣庫存。前端不持有 Grocy 或 Gemini API 金鑰。
+
+### 用地圖找物品
+
+進入「家的地圖」，選擇「編輯地圖」後上傳 PNG、JPEG 或 WebP 底圖，新增房間並拖曳輪廓頂點。選取房間，再把 Grocy 的既有收納位置或新位置釘在地圖上；保存後，其他裝置會看到相同地圖。
+
+點選收納標記會列出物品；搜尋物品或從庫存點「看位置」，可以定位到標記。標記代表一個收納位置，例如冰箱或抽屜；物品仍使用 Grocy 的位置資料。移除房間或取消釘選會保留庫存。
+
+房間輪廓、圖釘和底圖可保存或取消；建立／改名 Grocy 位置及移動物品會直接更新庫存，介面有分別提示。多人同時編輯時，舊版本保存會被拒絕，並保留草稿供檢查。
+
+底圖與房間座標只存於本機服務的私人資料 volume，不放進公開 repo，也不傳給 Gemini。圖片限 10 MiB、1600 萬像素。這是位置管理介面，不是建築 CAD。
 
 ## 本機啟動
 
@@ -108,7 +119,7 @@ uv run python scripts/seed_demo.py --clear-demo --confirm-demo
 
 GitHub 用於原始碼和版本管理；GitHub Pages 的靜態服務不能單獨執行 Grocy 與這個後端。
 
-停止容器時不要移除資料 volume。資料備份需要包含 `data/grocy/`（完整庫存）、`app-data` volume（登入、提案與操作紀錄）與本機設定（分開安全保存）；網頁 JSON 匯出提供可讀資料副本，不等同完整服務還原。
+停止容器時不要移除資料 volume。資料備份需要包含 `data/grocy/`（完整庫存）、`app-data` volume（登入、提案、操作紀錄、地圖與私人底圖）與本機設定（分開安全保存）；網頁 JSON 匯出包含地圖座標但不包含底圖，不等同完整服務還原。
 
 ## 驗證
 
@@ -116,11 +127,14 @@ GitHub 用於原始碼和版本管理；GitHub Pages 的靜態服務不能單獨
 uv run pytest -q
 node --check web/app.js
 node --check web/contracts.js
+node --check web/floorplan.js
 node --check web/sw.js
 docker compose config --quiet
 ```
 
 實際執行結果、瀏覽器檢查與尚未完成項目見 [驗證紀錄](docs/verification.md)。API 及資料欄位見 [開發契約](docs/contract.md)。
+
+地圖的資料格式見 [地圖契約](docs/floorplan-contract.md)，實測範圍見 [地圖驗證](docs/floorplan-verification.md)。
 
 ## 上游與授權
 

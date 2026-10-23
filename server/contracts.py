@@ -1,7 +1,7 @@
 """Application API and Grocy metadata contracts; no model-supplied URLs."""
 from datetime import date
 from typing import Annotated, Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 API = "/api"
 SESSION = f"{API}/session"
@@ -13,6 +13,10 @@ ACTIONS = f"{API}/actions"
 CHAT = f"{API}/chat"
 PROPOSALS = f"{API}/proposals"
 EXPORT = f"{API}/export"
+FLOORPLAN = f"{API}/floorplan"
+FLOORPLAN_IMAGE = f"{FLOORPLAN}/image"
+LOCATIONS = f"{API}/locations"
+FLOORPLAN_BODY_LIMIT = 16 * 1024 * 1024
 CATEGORIES = {"food": "食材", "supplies": "家用消耗品", "maintenance": "維護用品", "tools": "工具"}
 USERFIELDS = {"category": "分類", "model": "型號", "interval_days": "維護間隔天數", "last_maintained": "上次維護"}
 Nonnegative = Annotated[float, Field(ge=0, le=1e9, allow_inf_nan=False)]
@@ -85,3 +89,64 @@ class ChatInput(StrictModel):
 
 class LoginInput(StrictModel):
     password: str = Field(min_length=1, max_length=1024)
+
+
+Coordinate = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False, strict=True)]
+GeometryID = Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")]
+
+class Point(StrictModel):
+    x: Coordinate
+    y: Coordinate
+
+class Canvas(StrictModel):
+    width: int = Field(ge=200, le=8000, strict=True)
+    height: int = Field(ge=200, le=8000, strict=True)
+
+    @model_validator(mode="after")
+    def pixel_limit(self):
+        if self.width * self.height > 16_000_000:
+            raise ValueError("Canvas exceeds 16 megapixels")
+        return self
+
+class Room(StrictModel):
+    id: GeometryID
+    name: Text
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+    points: list[Point] = Field(min_length=3, max_length=40)
+
+    @model_validator(mode="after")
+    def nonempty_polygon(self):
+        points = self.points
+        area = sum(p.x * q.y - q.x * p.y for p, q in zip(points, points[1:] + points[:1]))
+        if abs(area) < 1e-10:
+            raise ValueError("Room must have a nonzero area")
+        return self
+
+class Spot(Point):
+    id: GeometryID
+    location_id: int = Field(gt=0, strict=True)
+    room_id: GeometryID | None = None
+
+class SavePlan(StrictModel):
+    revision: int = Field(ge=0, strict=True)
+    title: Text
+    canvas: Canvas
+    rooms: list[Room] = Field(max_length=60)
+    spots: list[Spot] = Field(max_length=300)
+    image_data_url: str | None = Field(default=None, max_length=14_000_000)
+
+    @model_validator(mode="after")
+    def unique_references(self):
+        room_ids = [room.id for room in self.rooms]
+        spot_ids = [spot.id for spot in self.spots]
+        location_ids = [spot.location_id for spot in self.spots]
+        if len(set(room_ids + spot_ids)) != len(room_ids + spot_ids):
+            raise ValueError("Room and spot IDs must be unique")
+        if len(set(location_ids)) != len(location_ids):
+            raise ValueError("Each location can only be pinned once")
+        if any(spot.room_id is not None and spot.room_id not in room_ids for spot in self.spots):
+            raise ValueError("Spot references an unknown room")
+        return self
+
+class LocationName(StrictModel):
+    name: Text

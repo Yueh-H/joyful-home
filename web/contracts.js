@@ -2,6 +2,8 @@ export const API = Object.freeze({
   session: '/api/session', login: '/api/login', logout: '/api/logout',
   state: '/api/state', items: '/api/items', actions: '/api/actions',
   chat: '/api/chat', export: '/api/export',
+  floorplan: '/api/floorplan', floorplanImage: '/api/floorplan/image', locations: '/api/locations',
+  location: id => `/api/locations/${encodeURIComponent(id)}`,
   item: id => `/api/items/${encodeURIComponent(id)}`,
   applyProposal: id => `/api/proposals/${encodeURIComponent(id)}/apply`,
 });

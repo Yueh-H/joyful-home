@@ -1,4 +1,6 @@
-# Joyful Home v0.1 shared contract
+# Joyful Home shared contract
+
+Editable map APIs and private image handling are defined in [the map contract](floorplan-contract.md).
 
 Name: 愉悅的家庭管家. 阿魚 is a family member, never the AI name.
 Grocy is the only source of inventory; no duplicate local inventory database. Runtime database for auth/proposals/logs is allowed, ignored by Git.
@@ -25,8 +27,8 @@ Error body: {detail:string}. Grocy failure must be reported, never silently show
 
 ## Data
 
-Item = {id:number,name:string,category:'food'|'supplies'|'maintenance'|'tools',quantity:number,unit:string,location:string,min_quantity:number,best_before:string|null,opened:boolean,model:string,description:string,interval_days:number|null,last_maintained:string|null,next_due:string|null}. location is the product's primary storage location. best_before/opened refer to the nearest-expiry remaining batch, not all batches.
-ItemInput fields same except id,next_due optional; name,category required for create; defaults quantity=0,unit='個',location='未分類',min_quantity=0.
+Item = {id:number,name:string,category:'food'|'supplies'|'maintenance'|'tools',quantity:number,unit:string,location:string,location_id:number,min_quantity:number,best_before:string|null,opened:boolean,model:string,description:string,interval_days:number|null,last_maintained:string|null,next_due:string|null}. location is the product's primary storage location; location_id is its stable Grocy ID for map markers. best_before/opened refer to the nearest-expiry remaining batch, not all batches.
+ItemInput fields same except id,location_id,next_due are response-only; name,category required for create; defaults quantity=0,unit='個',location='未分類',min_quantity=0.
 Shopping = {id:number,item_id:number,name:string,amount:number,unit:string}
 Activity = {id:string,at:string,message:string}
 Dates YYYY-MM-DD in Asia/Taipei. Quantities finite >=0, action amounts >0; reject overconsumption.
