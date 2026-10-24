@@ -24,7 +24,7 @@ const AUTO_REFRESH_MS = 30_000;
 let lastStateAttempt = null, automaticRefresh = null, automaticRefreshTimer = null;
 const conversationStates = new Map();
 function newChat(id = null) {
-  return { id, localKey: id || 'draft-' + (crypto.randomUUID?.() || String(Date.now()) + Math.random()), busy: false, messages: [], before: null, error: '', persistent: false,
+  return { id, deleted: false, localKey: id || 'draft-' + (crypto.randomUUID?.() || String(Date.now()) + Math.random()), busy: false, messages: [], before: null, error: '', persistent: false,
     loading: false, attempt: null, proposal: null, draft: '', composing: false, images: [], readGeneration: 0 };
 }
 let chat = newChat();
@@ -86,10 +86,12 @@ function loggedOut(message = '', configured = true) {
   lastUpdated = null;lastStateAttempt=null;automaticRefresh=null;clearTimeout(automaticRefreshTimer);automaticRefreshTimer=null;
   for (const target of new Set(conversationStates.values())) { target.images = []; target.messages = []; target.draft = ''; target.proposal = null; target.attempt = null; }
   conversationStates.clear(); chat = newChat(); conversationStates.set('draft', chat);
+  deletedConversations.clear();
   conversations = []; conversationsBefore = null; conversationsLoading = false; conversationsReady = false; conversationsError = '';
   selectedPreference(null);
   if (conversationDialog.open) conversationDialog.close();
   conversationDialog.replaceChildren();
+  delete conversationDialog.dataset.pending;
   conversationReturnFocus = null;
   state = null;
   chat.messages = [];
@@ -148,8 +150,77 @@ async function loadState({ background = false } = {}) {
   }
 }
 
+const deletedConversations = new Set();
+function forgetConversation(id) {
+  if (!id) return;
+  deletedConversations.add(id);
+  ++conversationsReadGeneration; conversationsLoading = false;
+  for (const [key, target] of conversationStates) if (target.id === id) {
+    target.deleted = true; ++target.readGeneration;
+    target.messages = []; target.images = []; target.draft = ''; target.proposal = null; target.attempt = null; target.busy = false;
+    conversationStates.delete(key);
+  }
+  conversations = conversations.filter(row => row.conversation_id !== id);
+  if (chat.id === id) {
+    if (conversations.length) selectConversation(conversations[0].conversation_id);
+    else {
+      chat = newChat(); conversationStates.set('draft', chat); selectedPreference(null);
+      if (conversationDialog.open) conversationDialog.close();
+      render();
+    }
+  } else updateConversationPanels();
+}
+
+function openConversationActions(id, deleting = false) {
+  const row = conversations.find(value => value.conversation_id === id);
+  if (!row || deletedConversations.has(id)) return;
+  if (!conversationDialog.open) conversationReturnFocus = document.activeElement;
+  conversationDialog.innerHTML = `<div class="dialog-head"><h2 id="conversation-dialog-title">${deleting ? '刪除對話？' : '管理對話'}</h2><button type="button" class="close" data-conversation-close aria-label="關閉對話管理">×</button></div>${deleting
+    ? `<form data-conversation-action><p class="conversation-delete-note">將從歷史移除「${esc(row.title)}」，之後無法再開啟。這不會改變庫存，也不會撤銷已確認的記錄。<br><small>本機保留刪除標記與原始資料，這項操作不是永久清除。</small></p><p class="form-error" role="alert"></p><div class="dialog-actions"><button class="button ghost" type="button" data-conversation-cancel>取消</button><button class="button danger-button" type="submit">刪除對話</button></div></form>`
+    : `<form data-conversation-action><label class="field"><span>對話名稱</span><input name="title" value="${esc(row.title)}" required maxlength="80" autocomplete="off"></label><p class="form-error" role="alert"></p><div class="dialog-actions"><button class="button ghost" type="button" data-conversation-cancel>取消</button><button class="button" type="submit">儲存名稱</button></div></form><button class="text-button danger-text" data-conversation-delete>刪除對話</button>`}`;
+  const form = conversationDialog.querySelector('[data-conversation-action]');
+  conversationDialog.querySelector('[data-conversation-close]').addEventListener('click', () => conversationDialog.close());
+  conversationDialog.querySelector('[data-conversation-cancel]').addEventListener('click', () => conversationDialog.close());
+  conversationDialog.querySelector('[data-conversation-delete]')?.addEventListener('click', () => openConversationActions(id, true));
+  const input = form.elements.title;
+  input?.addEventListener('input', () => input.setCustomValidity(''));
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (conversationDialog.dataset.pending) return;
+    const title = input?.value.trim();
+    if (!deleting && !title) { input.setCustomValidity('請輸入對話名稱，不能只有空白。'); input.reportValidity(); return; }
+    const generation = sessionGeneration;
+    const controls = [...conversationDialog.querySelectorAll('button,input')];
+    controls.forEach(control => { control.disabled = true; });
+    conversationDialog.dataset.pending = 'true';
+    const errorNode = form.querySelector('.form-error'); errorNode.textContent = '';
+    try {
+      const result = await request(API.conversation(id), deleting ? {} : { title }, deleting ? 'DELETE' : 'PATCH');
+      if (generation !== sessionGeneration) return;
+      ++conversationsReadGeneration; conversationsLoading = false;
+      conversationDialog.close();
+      if (deleting) forgetConversation(id);
+      else if (!deletedConversations.has(id)) {
+        conversations = conversations.map(value => value.conversation_id === id ? result : value).sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.conversation_id.localeCompare(a.conversation_id));
+        updateConversationPanels();
+      }
+      notify(deleting ? '已從歷史移除這個對話。庫存沒有變更。' : '對話名稱已儲存。');
+    } catch (error) {
+      if (generation !== sessionGeneration) return;
+      if (error.status === 410) { conversationDialog.close(); forgetConversation(id); notify('這個對話已刪除。', true); }
+      else errorNode.textContent = error.message || '儲存未完成，請確認連線後再試。';
+    } finally {
+      if (generation === sessionGeneration) { delete conversationDialog.dataset.pending; controls.forEach(control => { control.disabled = false; }); }
+    }
+  });
+  if (!conversationDialog.open) conversationDialog.showModal();
+  if (input) { input.focus(); input.select(); }
+  else conversationDialog.querySelector('[data-conversation-cancel]').focus();
+}
+conversationDialog.addEventListener('cancel', event => { if (conversationDialog.dataset.pending) event.preventDefault(); });
+
 function renderConversationList() {
-  return `<div class="conversation-heading"><h2>歷史對話</h2><button class="button" data-conversation-new ${conversationsLoading ? 'disabled' : ''}>新增對話</button></div>${conversationsError ? `<p class="form-error" role="alert">${esc(conversationsError)}</p>` : ''}<div class="conversation-list">${conversations.map(row => `<button class="conversation-entry ${chat.id === row.conversation_id ? 'selected' : ''}" data-conversation="${esc(row.conversation_id)}" ${chat.id === row.conversation_id ? 'aria-current="true"' : ''}><span>${esc(row.title)}</span><time datetime="${esc(row.updated_at)}">${esc(formatTime(row.updated_at))}${conversationStates.get(row.conversation_id)?.busy ? ' · 回覆中' : ''}</time></button>`).join('') || `<p class="subtitle">${conversationsLoading ? '正在讀取歷史對話…' : '還沒有對話。可以先寫下想問的事。'}</p>`}</div><div class="conversation-list-actions"><button class="text-button" data-conversations-refresh ${conversationsLoading ? 'disabled' : ''}>更新歷史對話</button>${conversationsBefore ? `<button class="text-button" data-conversations-older ${conversationsLoading ? 'disabled' : ''}>載入更早的對話</button>` : ''}</div>`;
+  return `<div class="conversation-heading"><h2>歷史對話</h2><button class="button" data-conversation-new ${conversationsLoading ? 'disabled' : ''}>新增對話</button></div>${conversationsError ? `<p class="form-error" role="alert">${esc(conversationsError)}</p>` : ''}<div class="conversation-list">${conversations.map(row => `<div class="conversation-row"><button class="conversation-entry ${chat.id === row.conversation_id ? 'selected' : ''}" data-conversation="${esc(row.conversation_id)}" ${chat.id === row.conversation_id ? 'aria-current="true"' : ''}><span>${esc(row.title)}</span><time datetime="${esc(row.updated_at)}">${esc(formatTime(row.updated_at))}${conversationStates.get(row.conversation_id)?.busy ? ' · 回覆中' : ''}</time></button><button type="button" class="conversation-more" data-conversation-menu="${esc(row.conversation_id)}" aria-label="更多：${esc(row.title)}" aria-haspopup="dialog">⋯</button></div>`).join('') || `<p class="subtitle">${conversationsLoading ? '正在讀取歷史對話…' : '還沒有對話。可以先寫下想問的事。'}</p>`}</div><div class="conversation-list-actions"><button class="text-button" data-conversations-refresh ${conversationsLoading ? 'disabled' : ''}>更新歷史對話</button>${conversationsBefore ? `<button class="text-button" data-conversations-older ${conversationsLoading ? 'disabled' : ''}>載入更早的對話</button>` : ''}</div>`;
 }
 
 function updateConversationPanels() {
@@ -163,7 +234,8 @@ function updateConversationPanels() {
 
 function selectConversation(id) {
   const input = $('#chat-message');
-  if (input && input.dataset.conversation === chat.localKey) chat.draft = input.value;
+  if (deletedConversations.has(id)) return;
+  if (input && !chat.deleted && input.dataset.conversation === chat.localKey) chat.draft = input.value;
   if (!conversationStates.has(id)) conversationStates.set(id, newChat(id));
   chat = conversationStates.get(id);
   selectedPreference(id);
@@ -181,8 +253,8 @@ async function loadConversations({ older = false, initial = false } = {}) {
     if (older && conversationsBefore) params.set('before', conversationsBefore);
     const data = await (await api(API.conversations + (params.size ? '?' + params : ''))).json();
     if (generation !== sessionGeneration || readGeneration !== conversationsReadGeneration) return;
-    const merged = new Map(conversations.map(row => [row.conversation_id, row]));
-    for (const row of data.conversations) if (!merged.has(row.conversation_id) || row.updated_at >= merged.get(row.conversation_id).updated_at) merged.set(row.conversation_id, row);
+    const merged = new Map((older ? conversations : []).map(row => [row.conversation_id, row]));
+    for (const row of data.conversations) if (!deletedConversations.has(row.conversation_id) && (!merged.has(row.conversation_id) || row.updated_at >= merged.get(row.conversation_id).updated_at)) merged.set(row.conversation_id, row);
     conversations = [...merged.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.conversation_id.localeCompare(a.conversation_id));
     conversationsBefore = data.before; conversationsReady = true;
     if (initial && !chat.id && !chat.draft && !chat.images.length && conversations.length) {
@@ -204,7 +276,7 @@ async function ensureConversation(target) {
   const generation = sessionGeneration;
   target.creating = (async () => {
     const row = await request(API.conversations, {});
-    if (generation !== sessionGeneration) return;
+    if (target.deleted || generation !== sessionGeneration) return;
     target.id = row.conversation_id; target.persistent = true;
     conversationStates.set(target.id, target);
     conversations = [row, ...conversations.filter(value => value.conversation_id !== row.conversation_id)];
@@ -240,24 +312,28 @@ function openConversationDrawer() {
 }
 conversationDialog.addEventListener('click', event => {
   const rect = conversationDialog.getBoundingClientRect();
-  if (event.target === conversationDialog && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)) conversationDialog.close();
+  if (!conversationDialog.dataset.pending && event.target === conversationDialog && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)) conversationDialog.close();
 });
 conversationDialog.addEventListener('close', () => {
   if (!authenticated) return;
-  const target = conversationReturnFocus?.isConnected ? conversationReturnFocus : app.querySelector('[data-conversation-drawer]');
+  const target = [conversationReturnFocus, app.querySelector('[data-conversation-drawer]'), app.querySelector('[data-conversation]'), $('#chat-message')].find(value => value?.isConnected && value.getClientRects().length && !value.disabled);
   target?.focus({ preventScroll: true });
 });
 function bindConversationControls(node) {
+  node.querySelectorAll('[data-conversation-menu]').forEach(button => {
+    if (!button.dataset.boundConversation) { button.dataset.boundConversation = 'true'; button.addEventListener('click', () => openConversationActions(button.dataset.conversationMenu)); }
+  });
   node.querySelectorAll('[data-conversation]').forEach(button => {
     if (button.tagName !== 'BUTTON' || button.dataset.boundConversation) return;
     button.dataset.boundConversation = 'true'; button.addEventListener('click', () => selectConversation(button.dataset.conversation));
   });
-  for (const [selector, handler] of [ ['[data-conversation-new]', createConversation], ['[data-conversation-drawer]', openConversationDrawer], ['[data-conversations-refresh]', () => loadConversations()], ['[data-conversations-older]', () => loadConversations({ older: true })] ]) {
+  for (const [selector, handler] of [ ['[data-conversation-new]', createConversation], ['[data-conversation-drawer]', openConversationDrawer], ['[data-conversations-refresh]', async () => { await loadConversations(); await loadChat(); }], ['[data-conversations-older]', () => loadConversations({ older: true })] ]) {
     node.querySelectorAll(selector).forEach(button => { if (!button.dataset.boundConversation) { button.dataset.boundConversation = 'true'; button.addEventListener('click', handler); } });
   }
 }
 
 async function loadChat({ older = false, target = chat } = {}) {
+  if (target.deleted) return;
   if (!target.id) { target.persistent = true; if (authenticated && target === chat) render(); return; }
   const readGeneration = ++target.readGeneration;
   const generation = sessionGeneration;
@@ -268,7 +344,7 @@ async function loadChat({ older = false, target = chat } = {}) {
     if (older && target.before) params.set('before', target.before);
     const path = API.chat + '?' + params;
     const data = await (await api(path)).json();
-    if (generation !== sessionGeneration || readGeneration !== target.readGeneration) return;
+    if (target.deleted || generation !== sessionGeneration || readGeneration !== target.readGeneration) return;
     target.persistent = data.persistent;
     target.before = data.before;
     const loaded = data.turns.flatMap(turn => {
@@ -292,9 +368,12 @@ async function loadChat({ older = false, target = chat } = {}) {
       target.attempt = null;
     }
   } catch (error) {
-    if (generation === sessionGeneration && readGeneration === target.readGeneration) target.error = error.message;
+    if (!target.deleted && generation === sessionGeneration && readGeneration === target.readGeneration) {
+      if (error.status === 410) forgetConversation(target.id);
+      else target.error = error.message;
+    }
   } finally {
-    if (generation === sessionGeneration && readGeneration === target.readGeneration) { target.loading = false; if (authenticated && target === chat) render(); }
+    if (!target.deleted && generation === sessionGeneration && readGeneration === target.readGeneration) { target.loading = false; if (authenticated && target === chat) render(); }
   }
 }
 
@@ -355,22 +434,22 @@ async function prepareChatImage(file) {
 async function addChatImages(files, target = chat) {
   const generation = sessionGeneration;
   // A native file picker may deliver its change event after logout removed its view.
-  if (!authenticated || ![...conversationStates.values()].includes(target) || target.busy) return;
+  if (target.deleted || !authenticated || ![...conversationStates.values()].includes(target) || target.busy) return;
   for (const file of files) {
-    if (generation !== sessionGeneration) return;
+    if (target.deleted || generation !== sessionGeneration) return;
     if (target.images.length >= CHAT_IMAGES.count) { notify('每次最多附上 4 張圖片。', true); break; }
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > CHAT_IMAGES.rawBytes) { notify('僅接受 PNG、JPEG、WebP 圖片，原檔每張最多 20 MiB；不支援 PDF 或其他檔案。', true); continue; }
     const image = { localId: crypto.randomUUID?.() || String(Date.now()) + Math.random(), pending: true };
     target.images.push(image); if (target === chat) updateChatImages();
     try {
       const prepared = await prepareChatImage(file);
-      if (generation !== sessionGeneration) return;
+      if (target.deleted || generation !== sessionGeneration) return;
       Object.assign(image, prepared, { pending: false });
     } catch (error) {
-      if (generation !== sessionGeneration) return;
+      if (target.deleted || generation !== sessionGeneration) return;
       target.images = target.images.filter(value => value !== image);
       if (target === chat) notify(error.message || '無法處理這張圖片，請重新選圖。', true);
-    } finally { if (generation === sessionGeneration && target === chat) updateChatImages(); }
+    } finally { if (!target.deleted && generation === sessionGeneration && target === chat) updateChatImages(); }
   }
 }
 
@@ -626,9 +705,14 @@ function bindPage() {
     const target = chat, generation = sessionGeneration;
     try {
       await request(API.dismissProposal(target.proposal.id), {});
-      if (generation !== sessionGeneration) return;
+      if (target.deleted || generation !== sessionGeneration) return;
       target.proposal = null; await loadChat({ target });
-    } catch (error) { if (generation === sessionGeneration && target === chat) notify(error.message, true); }
+    } catch (error) {
+      if (!target.deleted && generation === sessionGeneration) {
+        if (error.status === 410) forgetConversation(target.id);
+        else if (target === chat) notify(error.message, true);
+      }
+    }
   });
   app.querySelector('[data-apply]')?.addEventListener('click', applyProposal);
 }
@@ -796,7 +880,7 @@ async function sendChat(event) {
   const target = chat;
   const input = $('#chat-message');
   const text = input.value.trim();
-  if ((!text && !target.images.length) || target.images.some(image => image.pending) || target.busy || target.composing || !state.ai?.enabled) return;
+  if (target.deleted || (!text && !target.images.length) || target.images.some(image => image.pending) || target.busy || target.composing || !state.ai?.enabled) return;
   const generation = sessionGeneration;
   const imageKeys = target.images.map(image => image.localId).join(',');
   if (!target.attempt || target.attempt.text !== text || target.attempt.images !== imageKeys) target.attempt = { text, images: imageKeys, id: crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(24)), byte => byte.toString(16).padStart(2, '0')).join('') };
@@ -809,9 +893,9 @@ async function sendChat(event) {
   render();
   try {
     await ensureConversation(target);
-    if (generation !== sessionGeneration) return;
+    if (target.deleted || generation !== sessionGeneration) return;
     const response = await request(API.chat, { conversation_id: target.id, message: text, request_id: requestId, images: target.images.map(({ mime_type, data }) => ({ mime_type, data })) });
-    if (generation !== sessionGeneration) return;
+    if (target.deleted || generation !== sessionGeneration) return;
     if (response.status === 'complete') {
       target.messages = target.messages.map(message => message.id === `${requestId}:user` ? { ...message, local: false } : message);
       target.proposal = response.proposal || null;
@@ -820,10 +904,11 @@ async function sendChat(event) {
     } else if (response.status === 'processing') { if (input.isConnected && target === chat) input.value = text; target.draft = text; }
     await loadChat({ target });
   } catch (error) {
-    if (generation !== sessionGeneration) return;
+    if (target.deleted || generation !== sessionGeneration) return;
+    if (error.status === 410) { forgetConversation(target.id); return; }
     // A lost response does not prove a failed write. Read back before offering a retry.
     await loadChat({ target });
-    if (generation !== sessionGeneration) return;
+    if (target.deleted || generation !== sessionGeneration) return;
     target.error = error.message;
     if (!target.messages.some(message => message.id === `${requestId}:assistant` && message.status === 'complete')) {
       target.draft = text;
@@ -831,7 +916,7 @@ async function sendChat(event) {
       if (target === chat && currentInput && !currentInput.value) { currentInput.value = text; fitChatInput(currentInput); }
     }
   } finally {
-    if (generation === sessionGeneration) {
+    if (!target.deleted && generation === sessionGeneration) {
       target.busy = false;
       await loadConversations();
       if (target === chat) render();
@@ -842,23 +927,24 @@ async function sendChat(event) {
 
 async function applyProposal() {
   const target = chat;
-  if (!target.proposal || target.busy) return;
+  if (target.deleted || !target.proposal || target.busy) return;
   const generation = sessionGeneration;
   const proposalId = target.proposal.id;
   target.busy = true;
   render();
   try {
     const result = await request(API.applyProposal(proposalId), {});
-    if (generation !== sessionGeneration) return;
+    if (target.deleted || generation !== sessionGeneration) return;
     target.proposal = null;
     notify(result.message || '已確認並更新家的記錄。');
     await loadChat({ target });
     await loadState();
   } catch (error) {
-    if (generation !== sessionGeneration) return;
-    notify(error.message, true);
+    if (target.deleted || generation !== sessionGeneration) return;
+    if (error.status === 410) forgetConversation(target.id);
+    else notify(error.message, true);
   } finally {
-    if (generation === sessionGeneration) { target.busy = false; if (target === chat) render(); }
+    if (!target.deleted && generation === sessionGeneration) { target.busy = false; if (target === chat) render(); }
   }
 }
 

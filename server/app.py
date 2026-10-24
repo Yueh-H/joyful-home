@@ -428,6 +428,19 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
             raise ChatStoreError("新增對話需要本機 MongoDB 保存。")
         return app.state.chat.create_conversation()
 
+    @app.patch(c.CHAT_CONVERSATION)
+    def rename_chat_conversation(conversation_id: c.ConversationID, body: c.ConversationRename, sid=Depends(authenticated)):
+        if app.state.chat is None:
+            raise ChatStoreError("對話管理需要本機 MongoDB。")
+        return app.state.chat.rename_conversation(conversation_id, body.title)
+
+    @app.delete(c.CHAT_CONVERSATION)
+    def delete_chat_conversation(conversation_id: c.ConversationID, sid=Depends(authenticated)):
+        if app.state.chat is None:
+            raise ChatStoreError("對話管理需要本機 MongoDB。")
+        with lock:
+            return app.state.chat.delete_conversation(conversation_id)
+
     @app.get(c.CHAT)
     def chat_history(before: str | None = None, limit: int = Query(50, ge=1, le=100), conversation_id: c.ConversationID | None = None, sid=Depends(authenticated)):
         if app.state.chat is None:
@@ -475,6 +488,8 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
             history = store.context(document) if store else [x.model_dump() for x in body.history][-16:]
             provider_images = store.model_images(document, images) if store else []
             result = app.state.ai.respond(body.message, history, current, today(), images=provider_images) if provider_images else app.state.ai.respond(body.message, history, current, today())
+            if store:
+                store._run(lambda: store.require_conversation(document.get("conversation_id")))
             response = plan_chat(body, sid, current, result)
         except (HTTPException, AIError, GrocyError, FirestoreInventoryError, ChatStoreError) as exc:
             code = exc.status_code if isinstance(exc, (HTTPException, FirestoreInventoryError, ChatStoreError)) else (503 if isinstance(exc, AIError) else 502)
@@ -543,6 +558,8 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
 
     @app.post(c.PROPOSALS + "/{proposal_id}/dismiss")
     def dismiss_proposal(proposal_id: str, sid=Depends(authenticated)):
+        if app.state.chat:
+            app.state.chat.require_proposal(proposal_id)
         with database() as db:
             changed = db.execute("UPDATE proposals SET status='dismissed' WHERE id=? AND session=? AND status='pending'", (proposal_id, sid))
             if changed.rowcount != 1:
@@ -552,6 +569,8 @@ def create_app(grocy=None, ai=None, db_path=None, password=None, secret=None, st
     @app.post(c.PROPOSALS + "/{proposal_id}/apply")
     def apply_proposal(proposal_id: str, sid=Depends(authenticated)):
         with lock:
+            if app.state.chat:
+                app.state.chat.require_proposal(proposal_id)
             with database() as db:
                 row = db.execute("SELECT snapshot,actions,expires,status FROM proposals WHERE id=? AND session=?", (proposal_id, sid)).fetchone()
                 if not row:

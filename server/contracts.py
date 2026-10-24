@@ -12,6 +12,7 @@ ITEMS = f"{API}/items"
 ACTIONS = f"{API}/actions"
 CHAT = f"{API}/chat"
 CHAT_CONVERSATIONS = f"{CHAT}/conversations"
+CHAT_CONVERSATION = f"{CHAT_CONVERSATIONS}/{{conversation_id}}"
 CHAT_LEGACY = "legacy"
 ConversationID = Annotated[str, Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")]
 CHAT_IMAGE = f"{CHAT}/{{request_id}}/images/{{image_id}}"
@@ -101,6 +102,9 @@ class Turn(StrictModel):
 class ChatImage(StrictModel):
     mime_type: Literal["image/png", "image/jpeg", "image/webp"]
     data: str = Field(min_length=1, max_length=((CHAT_IMAGE_MAX_BYTES + 2) // 3) * 4)
+
+class ConversationRename(StrictModel):
+    title: str = Field(min_length=1, max_length=80)
 
 class ChatInput(StrictModel):
     conversation_id: ConversationID | None = None

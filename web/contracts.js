@@ -4,6 +4,7 @@ export const API = Object.freeze({
   state: '/api/state', items: '/api/items', actions: '/api/actions',
   chat: '/api/chat', conversations: '/api/chat/conversations', export: '/api/export',
   floorplan: '/api/floorplan', floorplanImage: '/api/floorplan/image', locations: '/api/locations',
+  conversation: id => `/api/chat/conversations/${encodeURIComponent(id)}`,
   location: id => `/api/locations/${encodeURIComponent(id)}`,
   item: id => `/api/items/${encodeURIComponent(id)}`,
   dismissProposal: id => `/api/proposals/${encodeURIComponent(id)}/dismiss`,
